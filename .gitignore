@@ -1,0 +1,157 @@
+## =========================
+## .NET / C# .gitignore
+## =========================
+
+## -----------------------
+## Build output
+## -----------------------
+bin/
+obj/
+publish/
+[Bb]in/
+[Oo]bj/
+
+## -----------------------
+## Build results
+## -----------------------
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+bld/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+
+## -----------------------
+## IDE files - Visual Studio
+## -----------------------
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+## IDE files - JetBrains Rider
+.idea/
+
+## IDE files - Vim
+*.swp
+*.swo
+*~
+
+## -----------------------
+## NuGet
+## -----------------------
+*.nupkg
+*.snupkg
+packages/
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+## NuGet v3 lock file
+project.assets.json
+
+## -----------------------
+## User-specific files
+## -----------------------
+*.rsuser
+*.suo
+*.user
+*.userprefs
+
+## -----------------------
+## Test results
+## -----------------------
+TestResults/
+*.trx
+*.coveragexml
+coverage/
+
+## -----------------------
+## OS generated files
+## -----------------------
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+## -----------------------
+## Environment files
+## -----------------------
+.env
+.env.local
+.env.*.local
+appsettings.local.json
+
+## -----------------------
+## Logging and diagnostics
+## -----------------------
+*.log
+BenchmarkDotNet.Artifacts/
+
+## -----------------------
+## Miscellaneous
+## -----------------------
+# ASP.NET scaffolding
+ScaffoldingReadMe.txt
+
+# StyleCop
+StyleCopReport.xml
+
+# Files built by Visual Studio
+*_i.c
+*_p.c
+*_h.h
+*.ilk
+*.meta
+*.obj
+*.iobj
+*.pch
+*.pdb
+*.ipdb
+*.pgc
+*.pgd
+*.rsp
+*.sbr
+*.tlb
+*.tli
+*.tlh
+*.tmp
+*.tmp_proj
+*_wpftmp.csproj
+*.vspscc
+*.vssscc
+.builds
+*.pidb
+*.svclog
+*.scc
+
+# Visual Studio profiler
+*.psess
+*.vsp
+*.vspx
+*.sap
+
+# Visual Studio cache/options
+*.cachefile
+*.VisualState.xml
+
+# Publish profiles
+*.pubxml
+!**/PublishProfiles/*.pubxml
+
+# Windows Installer
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+
+# Backup and merge files
+*.orig
+*.bak
+*.swp

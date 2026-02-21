@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Cortex.Core\Cortex.Core.csproj" />
+    <ProjectReference Include="..\Cortex.Messaging\Cortex.Messaging.csproj" />
+    <ProjectReference Include="..\Cortex.Agents\Cortex.Agents.csproj" />
+    <ProjectReference Include="..\Cortex.Skills\Cortex.Skills.csproj" />
+  </ItemGroup>
+
+</Project>
