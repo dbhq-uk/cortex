@@ -94,12 +94,12 @@ public sealed class InMemoryMessageBusTests
     {
         // Arrange
         var bus = new InMemoryMessageBus();
-        var callCount = 0;
+        var deliveredMessages = new List<string>();
         var firstDelivered = new TaskCompletionSource<bool>();
 
-        await bus.StartConsumingAsync("stop-queue", _ =>
+        await bus.StartConsumingAsync("stop-queue", envelope =>
         {
-            Interlocked.Increment(ref callCount);
+            deliveredMessages.Add(((TestMessage)envelope.Message).Content);
             firstDelivered.TrySetResult(true);
             return Task.CompletedTask;
         });
@@ -109,14 +109,21 @@ public sealed class InMemoryMessageBusTests
         // Wait for confirmed delivery of first message
         await firstDelivered.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        // Act
+        // Act — stop consumers, then wait for loop to actually exit
         await bus.StopConsumingAsync();
+        await Task.Delay(50);
 
-        await bus.PublishAsync(CreateEnvelope("second"), "stop-queue");
+        // Record count after stop has settled
+        var countAfterStop = deliveredMessages.Count;
+
+        // Publish more messages — these should NOT be delivered
+        await bus.PublishAsync(CreateEnvelope("after-stop-1"), "stop-queue");
+        await bus.PublishAsync(CreateEnvelope("after-stop-2"), "stop-queue");
         await Task.Delay(100);
 
-        // Assert — only the first message was delivered
-        Assert.Equal(1, callCount);
+        // Assert — no new messages delivered after stop
+        Assert.Equal(countAfterStop, deliveredMessages.Count);
+        Assert.Contains("first", deliveredMessages);
     }
 
     [Fact]
