@@ -61,16 +61,7 @@ public sealed class RabbitMqMessageBus : IMessageBus, IAsyncDisposable
         // Ensure the queue exists and is bound before publishing
         var routingKey = $"queue.{queueName}";
 
-        await channel.QueueDeclareAsync(
-            queue: queueName,
-            durable: true,
-            exclusive: false,
-            autoDelete: false,
-            arguments: new Dictionary<string, object?>
-            {
-                ["x-dead-letter-exchange"] = _options.DeadLetterExchangeName
-            },
-            cancellationToken: cancellationToken);
+        await DeclareQueueAsync(channel, queueName, cancellationToken);
 
         await channel.QueueBindAsync(
             queue: queueName,
@@ -119,16 +110,7 @@ public sealed class RabbitMqMessageBus : IMessageBus, IAsyncDisposable
         // Declare the queue and bind it
         var routingKey = $"queue.{queueName}";
 
-        await channel.QueueDeclareAsync(
-            queue: queueName,
-            durable: true,
-            exclusive: false,
-            autoDelete: false,
-            arguments: new Dictionary<string, object?>
-            {
-                ["x-dead-letter-exchange"] = _options.DeadLetterExchangeName
-            },
-            cancellationToken: cancellationToken);
+        await DeclareQueueAsync(channel, queueName, cancellationToken);
 
         await channel.QueueBindAsync(
             queue: queueName,
@@ -284,6 +266,38 @@ public sealed class RabbitMqMessageBus : IMessageBus, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Name of the dead letter queue (terminal destination for failed messages).
+    /// </summary>
+    private const string DeadLetterQueueName = "cortex.deadletter.queue";
+
+    /// <summary>
+    /// Declares a queue with standard settings.
+    /// Normal queues get a dead-letter-exchange argument; the dead letter queue itself does not.
+    /// </summary>
+    private async Task DeclareQueueAsync(
+        IChannel channel,
+        string queueName,
+        CancellationToken cancellationToken)
+    {
+        var isDeadLetterQueue = string.Equals(queueName, DeadLetterQueueName, StringComparison.Ordinal);
+
+        var arguments = isDeadLetterQueue
+            ? new Dictionary<string, object?>()
+            : new Dictionary<string, object?>
+            {
+                ["x-dead-letter-exchange"] = _options.DeadLetterExchangeName
+            };
+
+        await channel.QueueDeclareAsync(
+            queue: queueName,
+            durable: true,
+            exclusive: false,
+            autoDelete: false,
+            arguments: arguments,
+            cancellationToken: cancellationToken);
+    }
+
     private async Task EnsureTopologyAsync(IChannel channel, CancellationToken cancellationToken)
     {
         if (_topologyDeclared)
@@ -307,16 +321,11 @@ public sealed class RabbitMqMessageBus : IMessageBus, IAsyncDisposable
             autoDelete: false,
             cancellationToken: cancellationToken);
 
-        // Declare the dead letter queue
-        await channel.QueueDeclareAsync(
-            queue: "cortex.deadletter.queue",
-            durable: true,
-            exclusive: false,
-            autoDelete: false,
-            cancellationToken: cancellationToken);
+        // Declare the dead letter queue (no dead-letter-exchange — it's the terminal destination)
+        await DeclareQueueAsync(channel, DeadLetterQueueName, cancellationToken);
 
         await channel.QueueBindAsync(
-            queue: "cortex.deadletter.queue",
+            queue: DeadLetterQueueName,
             exchange: _options.DeadLetterExchangeName,
             routingKey: "",
             cancellationToken: cancellationToken);
