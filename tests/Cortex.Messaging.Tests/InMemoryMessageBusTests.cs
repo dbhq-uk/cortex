@@ -143,7 +143,7 @@ public sealed class InMemoryMessageBusTests
     public async Task PublishAsync_NullQueueName_ThrowsArgumentException()
     {
         var bus = new InMemoryMessageBus();
-        await Assert.ThrowsAsync<ArgumentException>(
+        await Assert.ThrowsAnyAsync<ArgumentException>(
             () => bus.PublishAsync(CreateEnvelope("test"), null!));
     }
 
@@ -151,7 +151,7 @@ public sealed class InMemoryMessageBusTests
     public async Task StartConsumingAsync_NullQueueName_ThrowsArgumentException()
     {
         var bus = new InMemoryMessageBus();
-        await Assert.ThrowsAsync<ArgumentException>(
+        await Assert.ThrowsAnyAsync<ArgumentException>(
             () => bus.StartConsumingAsync(null!, _ => Task.CompletedTask));
     }
 
