@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/Cortex.Agents/Cortex.Agents.csproj" />
     <Project Path="src/Cortex.Core/Cortex.Core.csproj" />
+    <Project Path="src/Cortex.Messaging.RabbitMQ/Cortex.Messaging.RabbitMQ.csproj" />
     <Project Path="src/Cortex.Messaging/Cortex.Messaging.csproj" />
     <Project Path="src/Cortex.Skills/Cortex.Skills.csproj" />
     <Project Path="src/Cortex.Web/Cortex.Web.csproj" />
@@ -9,6 +10,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/Cortex.Agents.Tests/Cortex.Agents.Tests.csproj" />
     <Project Path="tests/Cortex.Core.Tests/Cortex.Core.Tests.csproj" />
+    <Project Path="tests/Cortex.Messaging.RabbitMQ.Tests/Cortex.Messaging.RabbitMQ.Tests.csproj" />
     <Project Path="tests/Cortex.Messaging.Tests/Cortex.Messaging.Tests.csproj" />
   </Folder>
 </Solution>
