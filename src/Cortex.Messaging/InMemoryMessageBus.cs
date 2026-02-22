@@ -98,7 +98,15 @@ public sealed class InMemoryMessageBus : IMessageBus, IAsyncDisposable
         {
             await foreach (var envelope in reader.ReadAllAsync(cancellationToken))
             {
-                await handler(envelope);
+                try
+                {
+                    await handler(envelope);
+                }
+                catch (Exception)
+                {
+                    // Individual handler failure should not kill the consumer.
+                    // In a production bus, this would nack and dead-letter.
+                }
             }
         }
         catch (OperationCanceledException)

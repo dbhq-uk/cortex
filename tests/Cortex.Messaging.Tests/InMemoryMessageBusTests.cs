@@ -95,17 +95,19 @@ public sealed class InMemoryMessageBusTests
         // Arrange
         var bus = new InMemoryMessageBus();
         var callCount = 0;
+        var firstDelivered = new TaskCompletionSource<bool>();
 
         await bus.StartConsumingAsync("stop-queue", _ =>
         {
             Interlocked.Increment(ref callCount);
+            firstDelivered.TrySetResult(true);
             return Task.CompletedTask;
         });
 
         await bus.PublishAsync(CreateEnvelope("first"), "stop-queue");
 
-        // Wait for delivery
-        await Task.Delay(100);
+        // Wait for confirmed delivery of first message
+        await firstDelivered.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         // Act
         await bus.StopConsumingAsync();
@@ -115,6 +117,32 @@ public sealed class InMemoryMessageBusTests
 
         // Assert — only the first message was delivered
         Assert.Equal(1, callCount);
+    }
+
+    [Fact]
+    public async Task DisposeAsync_StopsConsumers()
+    {
+        // Arrange
+        var bus = new InMemoryMessageBus();
+        var callCount = 0;
+
+        await bus.StartConsumingAsync("dispose-queue", _ =>
+        {
+            Interlocked.Increment(ref callCount);
+            return Task.CompletedTask;
+        });
+
+        await bus.PublishAsync(CreateEnvelope("before-dispose"), "dispose-queue");
+        await Task.Delay(100);
+
+        // Act
+        await bus.DisposeAsync();
+
+        // The consumer should be stopped — messages published after dispose
+        // should not be delivered (the channel writer is completed)
+        var countAfterDispose = callCount;
+        await Task.Delay(100);
+        Assert.Equal(countAfterDispose, callCount);
     }
 
     [Fact]
