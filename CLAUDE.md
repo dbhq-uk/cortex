@@ -17,20 +17,22 @@ Cortex is a message-driven framework for running a business through a unified sy
 
 ```
 src/
-  Cortex.Core/        - Message contracts, authority model, reference codes, channels, teams
-  Cortex.Messaging/   - Message bus abstraction (IMessageBus, queue topology)
-  Cortex.Agents/      - Agent contracts (IAgent), delegation tracking
-  Cortex.Skills/      - Skill registry, execution contracts
-  Cortex.Web/         - Web UI (ASP.NET)
+  Cortex.Core/              - Message contracts, authority model, reference codes, channels, teams
+  Cortex.Messaging/         - Message bus abstraction (IMessageBus, queue topology, InMemoryMessageBus)
+  Cortex.Messaging.RabbitMQ/ - RabbitMQ message bus implementation
+  Cortex.Agents/            - Agent contracts (IAgent), delegation tracking
+  Cortex.Skills/            - Skill registry, execution contracts
+  Cortex.Web/               - Web UI (ASP.NET)
 tests/
   Cortex.Core.Tests/
   Cortex.Messaging.Tests/
+  Cortex.Messaging.RabbitMQ.Tests/  - Integration tests (require RabbitMQ)
   Cortex.Agents.Tests/
-skills/               - Skill definition files (markdown)
+skills/                     - Skill definition files (markdown)
 docs/
-  architecture/       - Vision document
-  adr/                - Architecture Decision Records
-  plans/              - Design and implementation plans
+  architecture/             - Vision document
+  adr/                      - Architecture Decision Records
+  plans/                    - Design and implementation plans
 ```
 
 ## Build Commands
@@ -42,7 +44,11 @@ dotnet restore
 # Build (Release)
 dotnet build --configuration Release
 
-# Run tests
+# Run unit tests only (no external dependencies)
+dotnet test --configuration Release --verbosity normal --filter "Category!=Integration"
+
+# Run all tests including integration tests (requires RabbitMQ)
+docker compose up -d
 dotnet test --configuration Release --verbosity normal
 
 # Build specific project
@@ -58,7 +64,8 @@ dotnet build src/Cortex.Core/Cortex.Core.csproj
 | `Cortex.Core.References`     | ReferenceCode value object, IReferenceCodeGenerator |
 | `Cortex.Core.Channels`       | IChannel, ChannelType                       |
 | `Cortex.Core.Teams`          | ITeam, TeamStatus                           |
-| `Cortex.Messaging`           | IMessageBus, IMessagePublisher, IMessageConsumer |
+| `Cortex.Messaging`           | IMessageBus, IMessagePublisher, IMessageConsumer, InMemoryMessageBus |
+| `Cortex.Messaging.RabbitMQ`  | RabbitMqMessageBus, RabbitMqConnection, RabbitMqOptions, MessageSerializer |
 | `Cortex.Agents`              | IAgent, IAgentRegistry, AgentRegistration   |
 | `Cortex.Agents.Delegation`   | DelegationRecord, IDelegationTracker        |
 | `Cortex.Skills`              | ISkill, ISkillRegistry, ISkillExecutor      |
@@ -69,7 +76,9 @@ dotnet build src/Cortex.Core/Cortex.Core.csproj
 - **Records for data**: Immutable record types for messages, claims, and registrations
 - **Value objects**: ReferenceCode is a readonly record struct with validation
 - **Directory.Build.props**: Shared build settings (nullable, warnings as errors, .NET 10)
-- **No RabbitMQ dependency yet**: Messaging layer is abstraction-only; implementation comes later
+- **RabbitMQ message bus**: Topic exchange routing, dead letter fanout, JSON serialisation with type headers
+- **InMemoryMessageBus**: For unit testing and local development without infrastructure
+- **Docker Compose**: Local RabbitMQ for integration testing (`docker compose up -d`)
 
 ## Coding Conventions
 

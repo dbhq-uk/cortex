@@ -69,20 +69,22 @@ graph TB
 ```
 cortex/
 ├── src/
-│   ├── Cortex.Core/          # Message contracts, authority model, reference codes
-│   ├── Cortex.Messaging/     # Message bus abstraction, queue topology
-│   ├── Cortex.Agents/        # Agent contracts, delegation tracking
-│   ├── Cortex.Skills/        # Skill registry, skill execution contracts
-│   └── Cortex.Web/           # Web UI (Phase 1)
+│   ├── Cortex.Core/              # Message contracts, authority model, reference codes
+│   ├── Cortex.Messaging/         # Message bus abstraction, queue topology, InMemoryMessageBus
+│   ├── Cortex.Messaging.RabbitMQ/ # RabbitMQ message bus implementation
+│   ├── Cortex.Agents/            # Agent contracts, delegation tracking
+│   ├── Cortex.Skills/            # Skill registry, skill execution contracts
+│   └── Cortex.Web/               # Web UI (Phase 1)
 ├── tests/
 │   ├── Cortex.Core.Tests/
 │   ├── Cortex.Messaging.Tests/
+│   ├── Cortex.Messaging.RabbitMQ.Tests/
 │   └── Cortex.Agents.Tests/
-├── skills/                    # Skill definitions (markdown)
+├── skills/                        # Skill definitions (markdown)
 └── docs/
-    ├── architecture/          # Vision and architecture docs
-    ├── adr/                   # Architecture Decision Records
-    └── plans/                 # Design and implementation plans
+    ├── architecture/              # Vision and architecture docs
+    ├── adr/                       # Architecture Decision Records
+    └── plans/                     # Design and implementation plans
 ```
 
 ## Getting Started
@@ -90,6 +92,7 @@ cortex/
 ### Prerequisites
 
 - [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
+- [Docker](https://www.docker.com/) (for integration tests and local RabbitMQ)
 
 ### Build
 
@@ -101,7 +104,33 @@ dotnet build
 ### Test
 
 ```bash
+# Unit tests only (no external dependencies)
+dotnet test --filter "Category!=Integration"
+
+# All tests including RabbitMQ integration tests (requires RabbitMQ)
+docker compose up -d
 dotnet test
+```
+
+### Local Development
+
+Start the infrastructure services:
+
+```bash
+docker compose up -d
+```
+
+This starts RabbitMQ with the management UI at [http://localhost:15672](http://localhost:15672) (credentials: `cortex` / `cortex`).
+
+Register the RabbitMQ message bus in your application:
+
+```csharp
+services.AddRabbitMqMessaging(options =>
+{
+    options.HostName = "localhost";
+    options.UserName = "cortex";
+    options.Password = "cortex";
+});
 ```
 
 ## Project Status
