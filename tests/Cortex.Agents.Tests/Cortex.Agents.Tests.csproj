@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Cortex.Agents\Cortex.Agents.csproj" />
+    <ProjectReference Include="..\..\src\Cortex.Messaging\Cortex.Messaging.csproj" />
   </ItemGroup>
 
   <ItemGroup>
