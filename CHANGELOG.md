@@ -35,3 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docker Compose configuration for local RabbitMQ development
 - RabbitMQ service container in CI pipeline for integration tests
 - Integration tests for RabbitMQ message bus (round-trip, type headers, dead letter, routing)
+- **Agent runtime harness** (Cortex.Agents)
+  - AgentHarness: connects IAgent to message queue with dispatch, reply routing, and FromAgentId stamping
+  - AgentRuntime: IHostedService + IAgentRuntime for static, dynamic, and team-scoped agent management
+  - IAgentRuntime: injectable interface for dynamic agent creation/destruction with team operations
+  - InMemoryAgentRegistry: thread-safe IAgentRegistry implementation
+  - InMemoryDelegationTracker: thread-safe IDelegationTracker implementation
+  - ServiceCollectionExtensions: `AddCortexAgentRuntime()` DI registration
+- ReplyTo and FromAgentId fields on MessageContext for request/reply patterns and sender identity
+- Per-consumer lifecycle on IMessageConsumer via IAsyncDisposable handles (breaking change)

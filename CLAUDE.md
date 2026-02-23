@@ -20,7 +20,7 @@ src/
   Cortex.Core/              - Message contracts, authority model, reference codes, channels, teams
   Cortex.Messaging/         - Message bus abstraction (IMessageBus, queue topology, InMemoryMessageBus)
   Cortex.Messaging.RabbitMQ/ - RabbitMQ message bus implementation
-  Cortex.Agents/            - Agent contracts (IAgent), delegation tracking
+  Cortex.Agents/            - Agent contracts (IAgent), harness, runtime, delegation tracking
   Cortex.Skills/            - Skill registry, execution contracts
   Cortex.Web/               - Web UI (ASP.NET)
 tests/
@@ -66,8 +66,8 @@ dotnet build src/Cortex.Core/Cortex.Core.csproj
 | `Cortex.Core.Teams`          | ITeam, TeamStatus                           |
 | `Cortex.Messaging`           | IMessageBus, IMessagePublisher, IMessageConsumer, InMemoryMessageBus |
 | `Cortex.Messaging.RabbitMQ`  | RabbitMqMessageBus, RabbitMqConnection, RabbitMqOptions, MessageSerializer |
-| `Cortex.Agents`              | IAgent, IAgentRegistry, AgentRegistration   |
-| `Cortex.Agents.Delegation`   | DelegationRecord, IDelegationTracker        |
+| `Cortex.Agents`              | IAgent, IAgentRegistry, AgentHarness, AgentRuntime, IAgentRuntime |
+| `Cortex.Agents.Delegation`   | DelegationRecord, IDelegationTracker, InMemoryDelegationTracker |
 | `Cortex.Skills`              | ISkill, ISkillRegistry, ISkillExecutor      |
 
 ## Design Decisions
@@ -79,6 +79,8 @@ dotnet build src/Cortex.Core/Cortex.Core.csproj
 - **RabbitMQ message bus**: Topic exchange routing, dead letter fanout, JSON serialisation with type headers
 - **InMemoryMessageBus**: For unit testing and local development without infrastructure
 - **Docker Compose**: Local RabbitMQ for integration testing (`docker compose up -d`)
+- **Agent runtime**: AgentHarness per agent, AgentRuntime as IHostedService, dynamic agent creation via IAgentRuntime with team support
+- **Per-consumer lifecycle**: IMessageConsumer.StartConsumingAsync returns IAsyncDisposable for independent consumer stop
 
 ## Coding Conventions
 
