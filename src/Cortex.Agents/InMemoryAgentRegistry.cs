@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 namespace Cortex.Agents;
 
 /// <summary>
@@ -5,15 +7,34 @@ namespace Cortex.Agents;
 /// </summary>
 public sealed class InMemoryAgentRegistry : IAgentRegistry
 {
+    private readonly ConcurrentDictionary<string, AgentRegistration> _agents = new();
+
     /// <inheritdoc />
     public Task RegisterAsync(AgentRegistration registration, CancellationToken cancellationToken = default)
-        => throw new NotImplementedException();
+    {
+        ArgumentNullException.ThrowIfNull(registration);
+        _agents[registration.AgentId] = registration;
+        return Task.CompletedTask;
+    }
 
     /// <inheritdoc />
     public Task<AgentRegistration?> FindByIdAsync(string agentId, CancellationToken cancellationToken = default)
-        => throw new NotImplementedException();
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(agentId);
+        _agents.TryGetValue(agentId, out var registration);
+        return Task.FromResult(registration);
+    }
 
     /// <inheritdoc />
     public Task<IReadOnlyList<AgentRegistration>> FindByCapabilityAsync(string capabilityName, CancellationToken cancellationToken = default)
-        => throw new NotImplementedException();
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(capabilityName);
+
+        var matches = _agents.Values
+            .Where(a => a.IsAvailable && a.Capabilities.Any(c =>
+                string.Equals(c.Name, capabilityName, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        return Task.FromResult<IReadOnlyList<AgentRegistration>>(matches);
+    }
 }
