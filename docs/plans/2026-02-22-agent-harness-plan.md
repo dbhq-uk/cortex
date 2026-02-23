@@ -2,45 +2,304 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Build the agent execution runtime that connects IAgent implementations to message queues, with dynamic agent creation, reply routing, and in-memory registry/tracker implementations.
+**Goal:** Build the agent execution runtime that connects IAgent implementations to message queues, with dynamic agent creation, reply routing, team-aware lifecycle, per-consumer lifecycle control, and in-memory registry/tracker implementations.
 
-**Architecture:** AgentHarness (per-agent queue connection) managed by AgentRuntime (IHostedService + IAgentRuntime singleton). InMemoryAgentRegistry and InMemoryDelegationTracker provide concrete implementations. ReplyTo field on MessageContext enables request/reply patterns.
+**Architecture:** AgentHarness (per-agent queue connection) managed by AgentRuntime (IHostedService + IAgentRuntime singleton). InMemoryAgentRegistry and InMemoryDelegationTracker provide concrete implementations. ReplyTo and FromAgentId fields on MessageContext enable request/reply patterns with sender identity. IMessageConsumer returns IAsyncDisposable handles for per-consumer lifecycle control.
 
 **Tech Stack:** .NET 10, xUnit, Microsoft.Extensions.Hosting, InMemoryMessageBus (from Cortex.Messaging)
 
+**Design:** See [Agent Harness Design](2026-02-22-agent-harness-design.md)
+**Research:** See [Agent Orchestration Patterns](../research/2026-02-23-agent-orchestration-patterns.md)
+
 ---
 
-### Task 1: Add ReplyTo to MessageContext
+### Task 1: Add ReplyTo and FromAgentId to MessageContext
 
 **Files:**
 - Modify: `src/Cortex.Core/Messages/MessageContext.cs`
 
-**Step 1: Add ReplyTo property**
+**Step 1: Add both properties**
 
 ```csharp
 /// <summary>
 /// Queue name where responses to this message should be sent.
 /// </summary>
 public string? ReplyTo { get; init; }
+
+/// <summary>
+/// The agent ID of the sender. Stamped by the agent harness on outbound messages.
+/// Required for delegation tracking, approval workflows, and audit trails.
+/// </summary>
+public string? FromAgentId { get; init; }
 ```
 
-Add this as the last property in the `MessageContext` record, after `ChannelId`.
+Add these as the last two properties in the `MessageContext` record, after `ChannelId`.
 
 **Step 2: Verify build**
 
 Run: `dotnet build --configuration Release`
-Expected: Build succeeds. This is an additive change to an immutable record — no existing code breaks.
+Expected: Build succeeds. These are additive changes to an immutable record — no existing code breaks.
 
 **Step 3: Commit**
 
 ```bash
 git add src/Cortex.Core/Messages/MessageContext.cs
-git commit -m "feat: add ReplyTo property to MessageContext for request/reply routing"
+git commit -m "feat: add ReplyTo and FromAgentId to MessageContext for request/reply and sender identity"
 ```
 
 ---
 
-### Task 2: InMemoryAgentRegistry — Tests (red)
+### Task 2: Per-Consumer Lifecycle — Update IMessageConsumer (breaking change)
+
+**Problem:** Multiple `AgentHarness` instances share one `IMessageBus`. The current `StopConsumingAsync()` stops ALL consumers — stopping one agent would stop every agent. Each harness needs to stop only its own consumer.
+
+**Files:**
+- Modify: `src/Cortex.Messaging/IMessageConsumer.cs`
+
+**Step 1: Change return type**
+
+```csharp
+namespace Cortex.Messaging;
+
+/// <summary>
+/// Consumes messages from named queues.
+/// </summary>
+public interface IMessageConsumer
+{
+    /// <summary>
+    /// Starts consuming messages from the specified queue.
+    /// Returns a handle that can be disposed to stop only this consumer.
+    /// </summary>
+    Task<IAsyncDisposable> StartConsumingAsync(
+        string queueName,
+        Func<MessageEnvelope, Task> handler,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Stops all consumers managed by this instance.
+    /// </summary>
+    Task StopConsumingAsync(CancellationToken cancellationToken = default);
+}
+```
+
+**Step 2: Verify build fails**
+
+Run: `dotnet build --configuration Release`
+Expected: Build FAILS — `InMemoryMessageBus` and `RabbitMqMessageBus` no longer satisfy the interface. This is expected; we fix them in the next two tasks.
+
+**Step 3: Commit**
+
+```bash
+git add src/Cortex.Messaging/IMessageConsumer.cs
+git commit -m "feat!: IMessageConsumer.StartConsumingAsync returns IAsyncDisposable for per-consumer lifecycle"
+```
+
+---
+
+### Task 3: Update InMemoryMessageBus for per-consumer lifecycle
+
+**Files:**
+- Modify: `src/Cortex.Messaging/InMemoryMessageBus.cs`
+- Modify: `tests/Cortex.Messaging.Tests/InMemoryMessageBusTests.cs`
+
+**Step 1: Add new test for per-consumer stop**
+
+Add to the existing test file:
+
+```csharp
+[Fact]
+public async Task StartConsumingAsync_ReturnsDisposableHandle_ThatStopsOnlyItsConsumer()
+{
+    var received1 = new TaskCompletionSource<MessageEnvelope>();
+    var received2 = new TaskCompletionSource<MessageEnvelope>();
+
+    var handle1 = await _bus.StartConsumingAsync("queue-1", envelope =>
+    {
+        received1.TrySetResult(envelope);
+        return Task.CompletedTask;
+    });
+
+    var handle2 = await _bus.StartConsumingAsync("queue-2", envelope =>
+    {
+        received2.TrySetResult(envelope);
+        return Task.CompletedTask;
+    });
+
+    // Stop only consumer 1
+    await handle1.DisposeAsync();
+
+    // Consumer 2 should still work
+    await _bus.PublishAsync(_testEnvelope, "queue-2");
+    var result = await received2.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    Assert.NotNull(result);
+}
+```
+
+**Step 2: Update InMemoryMessageBus implementation**
+
+Replace the consumer tracking in `InMemoryMessageBus` to use per-consumer `CancellationTokenSource` references and return disposable handles:
+
+```csharp
+using System.Collections.Concurrent;
+using System.Threading.Channels;
+using Cortex.Core.Messages;
+
+namespace Cortex.Messaging;
+
+/// <summary>
+/// In-memory message bus for unit testing and local development.
+/// Uses <see cref="System.Threading.Channels"/> for async message delivery.
+/// </summary>
+public sealed class InMemoryMessageBus : IMessageBus, IAsyncDisposable
+{
+    private readonly ConcurrentDictionary<string, Channel<MessageEnvelope>> _queues = new();
+    private readonly ConcurrentBag<ConsumerHandle> _consumers = [];
+
+    /// <inheritdoc />
+    public Task PublishAsync(
+        MessageEnvelope envelope,
+        string queueName,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(envelope);
+        ArgumentException.ThrowIfNullOrWhiteSpace(queueName);
+
+        var queue = _queues.GetOrAdd(queueName, _ => Channel.CreateUnbounded<MessageEnvelope>());
+        return queue.Writer.WriteAsync(envelope, cancellationToken).AsTask();
+    }
+
+    /// <inheritdoc />
+    public Task<IAsyncDisposable> StartConsumingAsync(
+        string queueName,
+        Func<MessageEnvelope, Task> handler,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(queueName);
+        ArgumentNullException.ThrowIfNull(handler);
+
+        var queue = _queues.GetOrAdd(queueName, _ => Channel.CreateUnbounded<MessageEnvelope>());
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+        var handle = new ConsumerHandle(cts);
+        _consumers.Add(handle);
+
+        _ = ConsumeLoopAsync(queue.Reader, handler, cts.Token);
+
+        return Task.FromResult<IAsyncDisposable>(handle);
+    }
+
+    /// <inheritdoc />
+    public async Task StopConsumingAsync(CancellationToken cancellationToken = default)
+    {
+        foreach (var handle in _consumers)
+        {
+            await handle.DisposeAsync();
+        }
+    }
+
+    /// <inheritdoc />
+    public Task<QueueTopology> GetTopologyAsync(CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(new QueueTopology());
+    }
+
+    /// <inheritdoc />
+    public async ValueTask DisposeAsync()
+    {
+        await StopConsumingAsync();
+    }
+
+    private static async Task ConsumeLoopAsync(
+        ChannelReader<MessageEnvelope> reader,
+        Func<MessageEnvelope, Task> handler,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var envelope in reader.ReadAllAsync(cancellationToken))
+            {
+                await handler(envelope);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Normal shutdown
+        }
+    }
+
+    private sealed class ConsumerHandle(CancellationTokenSource cts) : IAsyncDisposable
+    {
+        private int _disposed;
+
+        public async ValueTask DisposeAsync()
+        {
+            if (Interlocked.CompareExchange(ref _disposed, 1, 0) == 0)
+            {
+                await cts.CancelAsync();
+                cts.Dispose();
+            }
+        }
+    }
+}
+```
+
+**Step 3: Update existing tests that call StartConsumingAsync**
+
+Update any existing tests in `InMemoryMessageBusTests.cs` that call `StartConsumingAsync` to either discard the return value (using `_ = await` or just `await`) or capture it for disposal. The return value is `IAsyncDisposable` — existing `await _bus.StartConsumingAsync(...)` calls will still compile, but the return value should be captured in tests that verify stop behaviour.
+
+**Step 4: Run tests**
+
+Run: `dotnet test tests/Cortex.Messaging.Tests --configuration Release --verbosity normal`
+Expected: All tests PASS including the new per-consumer stop test.
+
+**Step 5: Commit**
+
+```bash
+git add src/Cortex.Messaging/InMemoryMessageBus.cs tests/Cortex.Messaging.Tests/
+git commit -m "feat: InMemoryMessageBus returns IAsyncDisposable handles for per-consumer lifecycle"
+```
+
+---
+
+### Task 4: Update RabbitMqMessageBus for per-consumer lifecycle
+
+**Files:**
+- Modify: `src/Cortex.Messaging.RabbitMQ/RabbitMqMessageBus.cs`
+- Modify: `tests/Cortex.Messaging.RabbitMQ.Tests/RabbitMqMessageBusTests.cs` (if needed)
+
+**Step 1: Update RabbitMqMessageBus.StartConsumingAsync**
+
+The RabbitMQ implementation needs to return an `IAsyncDisposable` handle that cancels only its consumer (via `BasicCancelAsync(consumerTag)`). The approach:
+
+1. Each call to `StartConsumingAsync` creates its own consumer on the channel
+2. The handle stores the consumer tag and channel reference
+3. `DisposeAsync` calls `BasicCancelAsync(consumerTag)` and cancels the per-consumer CTS
+4. `StopConsumingAsync` disposes all handles
+
+Key considerations:
+- RabbitMQ consumer tags are returned by `BasicConsumeAsync` — use them for targeted cancel
+- Each consumer handle needs its own `CancellationTokenSource` for the processing loop
+- Track all handles in a `ConcurrentBag<ConsumerHandle>` for bulk stop
+
+**Step 2: Update existing integration tests**
+
+Existing tests call `await bus.StartConsumingAsync(...)` — these compile fine but now return a handle. Update tests that verify consumer stop to use the handle.
+
+**Step 3: Run integration tests**
+
+Run: `docker compose up -d && dotnet test tests/Cortex.Messaging.RabbitMQ.Tests --configuration Release --verbosity normal`
+Expected: All integration tests PASS.
+
+**Step 4: Commit**
+
+```bash
+git add src/Cortex.Messaging.RabbitMQ/ tests/Cortex.Messaging.RabbitMQ.Tests/
+git commit -m "feat: RabbitMqMessageBus returns IAsyncDisposable handles for per-consumer lifecycle"
+```
+
+---
+
+### Task 5: InMemoryAgentRegistry — Tests (red)
 
 **Files:**
 - Create: `src/Cortex.Agents/InMemoryAgentRegistry.cs` (empty stub)
@@ -202,7 +461,7 @@ git commit -m "test: add InMemoryAgentRegistry tests (red)"
 
 ---
 
-### Task 3: InMemoryAgentRegistry — Implementation (green)
+### Task 6: InMemoryAgentRegistry — Implementation (green)
 
 **Files:**
 - Modify: `src/Cortex.Agents/InMemoryAgentRegistry.cs`
@@ -266,7 +525,7 @@ git commit -m "feat: implement InMemoryAgentRegistry with ConcurrentDictionary"
 
 ---
 
-### Task 4: InMemoryDelegationTracker — Tests (red)
+### Task 7: InMemoryDelegationTracker — Tests (red)
 
 **Files:**
 - Create: `src/Cortex.Agents/Delegation/InMemoryDelegationTracker.cs` (empty stub)
@@ -415,7 +674,7 @@ git commit -m "test: add InMemoryDelegationTracker tests (red)"
 
 ---
 
-### Task 5: InMemoryDelegationTracker — Implementation (green)
+### Task 8: InMemoryDelegationTracker — Implementation (green)
 
 **Files:**
 - Modify: `src/Cortex.Agents/Delegation/InMemoryDelegationTracker.cs`
@@ -496,7 +755,7 @@ git commit -m "feat: implement InMemoryDelegationTracker with ConcurrentDictiona
 
 ---
 
-### Task 6: EchoAgent and Test Helpers
+### Task 9: EchoAgent and Test Helpers
 
 **Files:**
 - Create: `tests/Cortex.Agents.Tests/TestMessage.cs`
@@ -585,10 +844,11 @@ git commit -m "test: add EchoAgent and TestMessage for agent harness testing"
 
 ---
 
-### Task 7: AgentHarness — Tests (red)
+### Task 10: AgentHarness — Tests (red)
 
 **Files:**
 - Create: `src/Cortex.Agents/AgentHarness.cs` (empty stub)
+- Create: `src/Cortex.Agents/IAgentTypeProvider.cs`
 - Create: `tests/Cortex.Agents.Tests/AgentHarnessTests.cs`
 
 The `Cortex.Agents` project needs a reference to `Cortex.Messaging` for `IMessageBus`. Add to `src/Cortex.Agents/Cortex.Agents.csproj`:
@@ -597,7 +857,31 @@ The `Cortex.Agents` project needs a reference to `Cortex.Messaging` for `IMessag
 <ProjectReference Include="..\Cortex.Messaging\Cortex.Messaging.csproj" />
 ```
 
-**Step 1: Create empty stub**
+Also add `Microsoft.Extensions.Logging.Abstractions` to the Agents project. Add to `src/Cortex.Agents/Cortex.Agents.csproj`:
+
+```xml
+<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.2" />
+```
+
+**Step 1: Create IAgentTypeProvider**
+
+```csharp
+// src/Cortex.Agents/IAgentTypeProvider.cs
+namespace Cortex.Agents;
+
+/// <summary>
+/// Optional interface for agents to declare their type ("human" or "ai").
+/// </summary>
+public interface IAgentTypeProvider
+{
+    /// <summary>
+    /// The agent type, typically "human" or "ai".
+    /// </summary>
+    string AgentType { get; }
+}
+```
+
+**Step 2: Create empty AgentHarness stub**
 
 ```csharp
 // src/Cortex.Agents/AgentHarness.cs
@@ -608,7 +892,9 @@ namespace Cortex.Agents;
 
 /// <summary>
 /// Connects a single <see cref="IAgent"/> to its message queue.
-/// Handles message dispatch, reply routing, and lifecycle management.
+/// Handles message dispatch, reply routing, FromAgentId stamping, and lifecycle management.
+/// Stores a per-consumer <see cref="IAsyncDisposable"/> handle so stopping this harness
+/// does not affect other consumers on the shared message bus.
 /// </summary>
 public sealed class AgentHarness
 {
@@ -637,20 +923,14 @@ public sealed class AgentHarness
         => throw new NotImplementedException();
 
     /// <summary>
-    /// Stops the harness: stops consuming and marks the agent as unavailable.
+    /// Stops the harness: disposes consumer handle and marks the agent as unavailable.
     /// </summary>
     public Task StopAsync(CancellationToken cancellationToken = default)
         => throw new NotImplementedException();
 }
 ```
 
-Also add `Microsoft.Extensions.Logging.Abstractions` to the Agents project. Add to `src/Cortex.Agents/Cortex.Agents.csproj`:
-
-```xml
-<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.2" />
-```
-
-**Step 2: Write failing tests**
+**Step 3: Write failing tests**
 
 ```csharp
 // tests/Cortex.Agents.Tests/AgentHarnessTests.cs
@@ -675,12 +955,13 @@ public sealed class AgentHarnessTests : IAsyncDisposable
 
     private static MessageEnvelope CreateEnvelope(
         string content,
-        string? replyTo = null) =>
+        string? replyTo = null,
+        string? fromAgentId = null) =>
         new()
         {
             Message = new TestMessage { Content = content },
             ReferenceCode = ReferenceCode.Create(DateTimeOffset.UtcNow, 1),
-            Context = new MessageContext { ReplyTo = replyTo }
+            Context = new MessageContext { ReplyTo = replyTo, FromAgentId = fromAgentId }
         };
 
     [Fact]
@@ -722,6 +1003,36 @@ public sealed class AgentHarnessTests : IAsyncDisposable
         await harness.StopAsync();
 
         Assert.False(harness.IsRunning);
+    }
+
+    [Fact]
+    public async Task StopAsync_DoesNotAffectOtherConsumers()
+    {
+        // Start two harnesses on the same bus
+        var agent1 = new EchoAgent();
+        var agent2 = new CallbackAgent("other-agent", e => Task.FromResult<MessageEnvelope?>(null));
+        var harness1 = CreateHarness(agent1);
+        var harness2 = CreateHarness(agent2);
+
+        await harness1.StartAsync();
+        await harness2.StartAsync();
+
+        // Stop harness 1
+        await harness1.StopAsync();
+
+        // Harness 2 should still receive messages
+        var received = new TaskCompletionSource<MessageEnvelope>();
+        var callbackAgent = new CallbackAgent("verify-agent", e =>
+        {
+            received.TrySetResult(e);
+            return Task.FromResult<MessageEnvelope?>(null);
+        });
+        var verifyHarness = CreateHarness(callbackAgent);
+        await verifyHarness.StartAsync();
+
+        await _bus.PublishAsync(CreateEnvelope("hello"), "agent.verify-agent");
+        var result = await received.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotNull(result);
     }
 
     [Fact]
@@ -767,6 +1078,27 @@ public sealed class AgentHarnessTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Response_HasFromAgentIdStamped()
+    {
+        var harness = CreateHarness(); // EchoAgent
+        await harness.StartAsync();
+
+        var replyReceived = new TaskCompletionSource<MessageEnvelope>();
+        await _bus.StartConsumingAsync("reply-queue", envelope =>
+        {
+            replyReceived.SetResult(envelope);
+            return Task.CompletedTask;
+        });
+
+        await _bus.PublishAsync(
+            CreateEnvelope("hello", replyTo: "reply-queue"),
+            "agent.echo-agent");
+
+        var reply = await replyReceived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("echo-agent", reply.Context.FromAgentId);
+    }
+
+    [Fact]
     public async Task ResponseWithNoReplyTo_IsDropped()
     {
         var harness = CreateHarness(); // EchoAgent always returns a response
@@ -806,21 +1138,21 @@ file sealed class CallbackAgent(
 }
 ```
 
-**Step 3: Run tests to verify they fail**
+**Step 4: Run tests to verify they fail**
 
 Run: `dotnet test tests/Cortex.Agents.Tests --configuration Release --verbosity normal`
 Expected: FAIL — `NotImplementedException` from stub methods.
 
-**Step 4: Commit**
+**Step 5: Commit**
 
 ```bash
 git add src/Cortex.Agents/ tests/Cortex.Agents.Tests/
-git commit -m "test: add AgentHarness tests (red)"
+git commit -m "test: add AgentHarness tests (red) — per-consumer lifecycle, FromAgentId stamping"
 ```
 
 ---
 
-### Task 8: AgentHarness — Implementation (green)
+### Task 11: AgentHarness — Implementation (green)
 
 **Files:**
 - Modify: `src/Cortex.Agents/AgentHarness.cs`
@@ -836,7 +1168,9 @@ namespace Cortex.Agents;
 
 /// <summary>
 /// Connects a single <see cref="IAgent"/> to its message queue.
-/// Handles message dispatch, reply routing, and lifecycle management.
+/// Handles message dispatch, reply routing, FromAgentId stamping, and lifecycle management.
+/// Stores a per-consumer <see cref="IAsyncDisposable"/> handle so stopping this harness
+/// does not affect other consumers on the shared message bus.
 /// </summary>
 public sealed class AgentHarness
 {
@@ -844,6 +1178,7 @@ public sealed class AgentHarness
     private readonly IMessageBus _messageBus;
     private readonly IAgentRegistry _agentRegistry;
     private readonly ILogger<AgentHarness> _logger;
+    private IAsyncDisposable? _consumerHandle;
 
     /// <summary>
     /// Creates a new <see cref="AgentHarness"/> for the specified agent.
@@ -892,7 +1227,8 @@ public sealed class AgentHarness
 
         await _agentRegistry.RegisterAsync(registration, cancellationToken);
 
-        await _messageBus.StartConsumingAsync(QueueName, HandleMessageAsync, cancellationToken);
+        _consumerHandle = await _messageBus.StartConsumingAsync(
+            QueueName, HandleMessageAsync, cancellationToken);
 
         IsRunning = true;
 
@@ -902,11 +1238,15 @@ public sealed class AgentHarness
     }
 
     /// <summary>
-    /// Stops the harness: stops consuming and marks the agent as unavailable.
+    /// Stops the harness: disposes consumer handle and marks the agent as unavailable.
     /// </summary>
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
-        await _messageBus.StopConsumingAsync(cancellationToken);
+        if (_consumerHandle is not null)
+        {
+            await _consumerHandle.DisposeAsync();
+            _consumerHandle = null;
+        }
 
         // Mark agent as unavailable
         var registration = await _agentRegistry.FindByIdAsync(_agent.AgentId, cancellationToken);
@@ -945,13 +1285,14 @@ public sealed class AgentHarness
             return;
         }
 
-        // Carry forward reference code and set parent message ID
+        // Carry forward reference code, set parent message ID, and stamp sender identity
         var replyEnvelope = response with
         {
             ReferenceCode = envelope.ReferenceCode,
             Context = response.Context with
             {
-                ParentMessageId = envelope.Message.MessageId
+                ParentMessageId = envelope.Message.MessageId,
+                FromAgentId = _agent.AgentId
             }
         };
 
@@ -964,30 +1305,6 @@ public sealed class AgentHarness
 }
 ```
 
-Note: The `AgentType` property needs to come from the agent somehow. We have two options: add it to `IAgent` or use a separate marker interface. Since `IAgent` doesn't have `AgentType`, use a simple fallback: if the agent doesn't provide a type, default to `"unknown"`. Define a small optional interface:
-
-```csharp
-// Add to src/Cortex.Agents/IAgentTypeProvider.cs
-namespace Cortex.Agents;
-
-/// <summary>
-/// Optional interface for agents to declare their type ("human" or "ai").
-/// </summary>
-public interface IAgentTypeProvider
-{
-    /// <summary>
-    /// The agent type, typically "human" or "ai".
-    /// </summary>
-    string AgentType { get; }
-}
-```
-
-Update the `EchoAgent` test helper to implement it:
-
-```csharp
-// In EchoAgent — no change needed, "unknown" is fine for a test agent
-```
-
 **Step 2: Run tests**
 
 Run: `dotnet test tests/Cortex.Agents.Tests --configuration Release --verbosity normal`
@@ -996,13 +1313,13 @@ Expected: All tests PASS.
 **Step 3: Commit**
 
 ```bash
-git add src/Cortex.Agents/ tests/Cortex.Agents.Tests/
-git commit -m "feat: implement AgentHarness with message dispatch and reply routing"
+git add src/Cortex.Agents/AgentHarness.cs
+git commit -m "feat: implement AgentHarness with per-consumer lifecycle, FromAgentId stamping, and reply routing"
 ```
 
 ---
 
-### Task 9: IAgentRuntime Interface
+### Task 12: IAgentRuntime Interface (with team operations)
 
 **Files:**
 - Create: `src/Cortex.Agents/IAgentRuntime.cs`
@@ -1014,7 +1331,7 @@ namespace Cortex.Agents;
 
 /// <summary>
 /// Runtime for managing agent harnesses. Supports both static (DI-registered)
-/// and dynamic (on-demand) agent lifecycle management.
+/// and dynamic (on-demand) agent lifecycle management, including team-scoped operations.
 /// </summary>
 public interface IAgentRuntime
 {
@@ -1025,14 +1342,30 @@ public interface IAgentRuntime
     Task<string> StartAgentAsync(IAgent agent, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Starts an agent as part of a team and connects it to its message queue.
+    /// Returns the agent's ID.
+    /// </summary>
+    Task<string> StartAgentAsync(IAgent agent, string teamId, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Stops a running agent and disconnects it from its queue.
     /// </summary>
     Task StopAgentAsync(string agentId, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Stops all agents belonging to a team.
+    /// </summary>
+    Task StopTeamAsync(string teamId, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// IDs of all currently running agents.
     /// </summary>
     IReadOnlyList<string> RunningAgentIds { get; }
+
+    /// <summary>
+    /// Returns the IDs of all running agents belonging to the specified team.
+    /// </summary>
+    IReadOnlyList<string> GetTeamAgentIds(string teamId);
 }
 ```
 
@@ -1045,12 +1378,12 @@ Expected: Build succeeds.
 
 ```bash
 git add src/Cortex.Agents/IAgentRuntime.cs
-git commit -m "feat: add IAgentRuntime interface for dynamic agent lifecycle"
+git commit -m "feat: add IAgentRuntime interface with team-aware agent lifecycle operations"
 ```
 
 ---
 
-### Task 10: AgentRuntime — Tests (red)
+### Task 13: AgentRuntime — Tests (red)
 
 **Files:**
 - Create: `src/Cortex.Agents/AgentRuntime.cs` (empty stub)
@@ -1098,7 +1431,19 @@ public sealed class AgentRuntime : IHostedService, IAgentRuntime
         => throw new NotImplementedException();
 
     /// <inheritdoc />
+    Task<string> IAgentRuntime.StartAgentAsync(IAgent agent, string teamId, CancellationToken cancellationToken)
+        => throw new NotImplementedException();
+
+    /// <inheritdoc />
     Task IAgentRuntime.StopAgentAsync(string agentId, CancellationToken cancellationToken)
+        => throw new NotImplementedException();
+
+    /// <inheritdoc />
+    Task IAgentRuntime.StopTeamAsync(string teamId, CancellationToken cancellationToken)
+        => throw new NotImplementedException();
+
+    /// <inheritdoc />
+    IReadOnlyList<string> IAgentRuntime.GetTeamAgentIds(string teamId)
         => throw new NotImplementedException();
 }
 ```
@@ -1225,6 +1570,65 @@ public sealed class AgentRuntimeTests : IAsyncDisposable
         await _runtime.StopAsync(CancellationToken.None);
     }
 
+    [Fact]
+    public async Task StartAgentAsync_WithTeamId_TracksTeamMembership()
+    {
+        await _runtime.StartAsync(CancellationToken.None);
+
+        IAgentRuntime rt = _runtime;
+        await rt.StartAgentAsync(new EchoAgent(), "team-alpha");
+
+        var teamAgents = rt.GetTeamAgentIds("team-alpha");
+        Assert.Single(teamAgents);
+        Assert.Equal("echo-agent", teamAgents[0]);
+
+        await _runtime.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task StopTeamAsync_StopsAllTeamAgents()
+    {
+        await _runtime.StartAsync(CancellationToken.None);
+
+        IAgentRuntime rt = _runtime;
+        await rt.StartAgentAsync(new EchoAgent(), "team-alpha");
+
+        await rt.StopTeamAsync("team-alpha");
+
+        Assert.Empty(rt.GetTeamAgentIds("team-alpha"));
+        Assert.DoesNotContain("echo-agent", _runtime.RunningAgentIds);
+
+        await _runtime.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task GetTeamAgentIds_UnknownTeam_ReturnsEmpty()
+    {
+        await _runtime.StartAsync(CancellationToken.None);
+
+        IAgentRuntime rt = _runtime;
+        var teamAgents = rt.GetTeamAgentIds("nonexistent");
+
+        Assert.Empty(teamAgents);
+
+        await _runtime.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task StopAgentAsync_RemovesFromTeamTracking()
+    {
+        await _runtime.StartAsync(CancellationToken.None);
+
+        IAgentRuntime rt = _runtime;
+        await rt.StartAgentAsync(new EchoAgent(), "team-alpha");
+
+        await rt.StopAgentAsync("echo-agent");
+
+        Assert.Empty(rt.GetTeamAgentIds("team-alpha"));
+
+        await _runtime.StopAsync(CancellationToken.None);
+    }
+
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
@@ -1242,12 +1646,12 @@ Expected: FAIL — `NotImplementedException` from stub methods.
 
 ```bash
 git add src/Cortex.Agents/ tests/Cortex.Agents.Tests/
-git commit -m "test: add AgentRuntime tests (red)"
+git commit -m "test: add AgentRuntime tests (red) — team operations, dynamic agents"
 ```
 
 ---
 
-### Task 11: AgentRuntime — Implementation (green)
+### Task 14: AgentRuntime — Implementation (green)
 
 **Files:**
 - Modify: `src/Cortex.Agents/AgentRuntime.cs`
@@ -1274,6 +1678,8 @@ public sealed class AgentRuntime : IHostedService, IAgentRuntime
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<AgentRuntime> _logger;
     private readonly ConcurrentDictionary<string, AgentHarness> _harnesses = new();
+    private readonly ConcurrentDictionary<string, ConcurrentBag<string>> _teamAgents = new();
+    private readonly ConcurrentDictionary<string, string> _agentTeams = new();
 
     /// <summary>
     /// Creates a new <see cref="AgentRuntime"/>.
@@ -1329,7 +1735,75 @@ public sealed class AgentRuntime : IHostedService, IAgentRuntime
     }
 
     /// <inheritdoc />
-    async Task<string> IAgentRuntime.StartAgentAsync(IAgent agent, CancellationToken cancellationToken)
+    Task<string> IAgentRuntime.StartAgentAsync(IAgent agent, CancellationToken cancellationToken) =>
+        StartAgentInternalAsync(agent, teamId: null, cancellationToken);
+
+    /// <inheritdoc />
+    Task<string> IAgentRuntime.StartAgentAsync(IAgent agent, string teamId, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(teamId);
+        return StartAgentInternalAsync(agent, teamId, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    async Task IAgentRuntime.StopAgentAsync(string agentId, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(agentId);
+
+        if (!_harnesses.TryRemove(agentId, out var harness))
+        {
+            _logger.LogWarning("Cannot stop agent {AgentId}: not running", agentId);
+            return;
+        }
+
+        // Remove from team tracking
+        if (_agentTeams.TryRemove(agentId, out var teamId))
+        {
+            if (_teamAgents.TryGetValue(teamId, out var members))
+            {
+                // ConcurrentBag doesn't support removal — rebuild without this agent
+                var remaining = new ConcurrentBag<string>(members.Where(id => id != agentId));
+                _teamAgents[teamId] = remaining;
+            }
+        }
+
+        await harness.StopAsync(cancellationToken);
+
+        _logger.LogInformation("Stopped agent {AgentId}", agentId);
+    }
+
+    /// <inheritdoc />
+    async Task IAgentRuntime.StopTeamAsync(string teamId, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(teamId);
+
+        var agentIds = ((IAgentRuntime)this).GetTeamAgentIds(teamId);
+
+        foreach (var agentId in agentIds)
+        {
+            await ((IAgentRuntime)this).StopAgentAsync(agentId, cancellationToken);
+        }
+
+        _teamAgents.TryRemove(teamId, out _);
+
+        _logger.LogInformation("Stopped all agents in team {TeamId}", teamId);
+    }
+
+    /// <inheritdoc />
+    IReadOnlyList<string> IAgentRuntime.GetTeamAgentIds(string teamId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(teamId);
+
+        if (_teamAgents.TryGetValue(teamId, out var members))
+        {
+            return members.ToList();
+        }
+
+        return [];
+    }
+
+    private async Task<string> StartAgentInternalAsync(
+        IAgent agent, string? teamId, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(agent);
 
@@ -1344,27 +1818,22 @@ public sealed class AgentRuntime : IHostedService, IAgentRuntime
             throw new InvalidOperationException($"Agent '{agent.AgentId}' is already running.");
         }
 
-        await harness.StartAsync(cancellationToken);
-
-        _logger.LogInformation("Started agent {AgentId}", agent.AgentId);
-
-        return agent.AgentId;
-    }
-
-    /// <inheritdoc />
-    async Task IAgentRuntime.StopAgentAsync(string agentId, CancellationToken cancellationToken)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(agentId);
-
-        if (!_harnesses.TryRemove(agentId, out var harness))
+        // Track team membership
+        if (teamId is not null)
         {
-            _logger.LogWarning("Cannot stop agent {AgentId}: not running", agentId);
-            return;
+            _agentTeams[agent.AgentId] = teamId;
+            var members = _teamAgents.GetOrAdd(teamId, _ => []);
+            members.Add(agent.AgentId);
         }
 
-        await harness.StopAsync(cancellationToken);
+        await harness.StartAsync(cancellationToken);
 
-        _logger.LogInformation("Stopped agent {AgentId}", agentId);
+        _logger.LogInformation(
+            "Started agent {AgentId}{TeamInfo}",
+            agent.AgentId,
+            teamId is not null ? $" in team {teamId}" : string.Empty);
+
+        return agent.AgentId;
     }
 }
 ```
@@ -1378,12 +1847,12 @@ Expected: All tests PASS.
 
 ```bash
 git add src/Cortex.Agents/AgentRuntime.cs
-git commit -m "feat: implement AgentRuntime with IHostedService and dynamic agent management"
+git commit -m "feat: implement AgentRuntime with IHostedService, dynamic agents, and team lifecycle"
 ```
 
 ---
 
-### Task 12: DI Extensions
+### Task 15: DI Extensions
 
 **Files:**
 - Create: `src/Cortex.Agents/AgentRuntimeBuilder.cs`
@@ -1479,20 +1948,25 @@ git commit -m "feat: add DI extensions for agent runtime registration"
 
 ---
 
-### Task 13: Full Test Suite Run
+### Task 16: Full Test Suite Run
 
-**Step 1: Run all tests**
+**Step 1: Run all unit tests**
 
-Run: `dotnet test --configuration Release --verbosity normal`
+Run: `dotnet test --configuration Release --verbosity normal --filter "Category!=Integration"`
 Expected: All tests PASS across all projects. Check for any regressions.
 
-**Step 2: Fix any issues discovered**
+**Step 2: Run integration tests (requires Docker)**
+
+Run: `docker compose up -d && dotnet test --configuration Release --verbosity normal`
+Expected: All tests PASS including RabbitMQ integration tests with new consumer lifecycle.
+
+**Step 3: Fix any issues discovered**
 
 If any test failures or build warnings, fix them and commit the fixes.
 
 ---
 
-### Task 14: Documentation Update
+### Task 17: Documentation Update
 
 **Files:**
 - Modify: `CHANGELOG.md`
@@ -1504,25 +1978,27 @@ Add to the `[Unreleased] > Added` section:
 
 ```markdown
 - **Agent runtime harness** (Cortex.Agents)
-  - AgentHarness: connects IAgent to message queue with dispatch and reply routing
-  - AgentRuntime: IHostedService + IAgentRuntime for static and dynamic agent management
-  - IAgentRuntime: injectable interface for dynamic agent creation/destruction
+  - AgentHarness: connects IAgent to message queue with dispatch, reply routing, and FromAgentId stamping
+  - AgentRuntime: IHostedService + IAgentRuntime for static, dynamic, and team-scoped agent management
+  - IAgentRuntime: injectable interface for dynamic agent creation/destruction with team operations
   - InMemoryAgentRegistry: thread-safe IAgentRegistry implementation
   - InMemoryDelegationTracker: thread-safe IDelegationTracker implementation
   - ServiceCollectionExtensions: `AddCortexAgentRuntime()` DI registration
-- ReplyTo field on MessageContext for request/reply message patterns
+- ReplyTo and FromAgentId fields on MessageContext for request/reply patterns and sender identity
+- Per-consumer lifecycle on IMessageConsumer via IAsyncDisposable handles (breaking change)
 ```
 
 **Step 2: Update CLAUDE.md**
 
 Update the Design Decisions section to add:
 ```markdown
-- **Agent runtime**: AgentHarness per agent, AgentRuntime as IHostedService, dynamic agent creation via IAgentRuntime
+- **Agent runtime**: AgentHarness per agent, AgentRuntime as IHostedService, dynamic agent creation via IAgentRuntime with team support
+- **Per-consumer lifecycle**: IMessageConsumer.StartConsumingAsync returns IAsyncDisposable for independent consumer stop
 ```
 
 **Step 3: Commit**
 
 ```bash
 git add CHANGELOG.md CLAUDE.md
-git commit -m "docs: update documentation with agent harness implementation"
+git commit -m "docs: update documentation with agent harness and consumer lifecycle changes"
 ```
