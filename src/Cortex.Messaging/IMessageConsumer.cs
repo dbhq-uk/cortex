@@ -3,17 +3,21 @@ using Cortex.Core.Messages;
 namespace Cortex.Messaging;
 
 /// <summary>
-/// Consumes messages from a named queue.
+/// Consumes messages from named queues.
 /// </summary>
 public interface IMessageConsumer
 {
     /// <summary>
     /// Starts consuming messages from the specified queue.
+    /// Returns a handle that can be disposed to stop only this consumer.
     /// </summary>
-    Task StartConsumingAsync(string queueName, Func<MessageEnvelope, Task> handler, CancellationToken cancellationToken = default);
+    Task<IAsyncDisposable> StartConsumingAsync(
+        string queueName,
+        Func<MessageEnvelope, Task> handler,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Stops consuming messages.
+    /// Stops all consumers managed by this instance.
     /// </summary>
     Task StopConsumingAsync(CancellationToken cancellationToken = default);
 }
