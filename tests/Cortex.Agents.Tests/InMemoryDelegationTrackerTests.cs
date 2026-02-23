@@ -6,14 +6,15 @@ namespace Cortex.Agents.Tests;
 public sealed class InMemoryDelegationTrackerTests
 {
     private readonly InMemoryDelegationTracker _tracker = new();
+    private int _sequenceCounter;
 
-    private static DelegationRecord CreateRecord(
+    private DelegationRecord CreateRecord(
         string delegatedTo = "agent-1",
         DelegationStatus status = DelegationStatus.Assigned,
         DateTimeOffset? dueAt = null) =>
         new()
         {
-            ReferenceCode = ReferenceCode.Create(DateTimeOffset.UtcNow, 1),
+            ReferenceCode = ReferenceCode.Create(DateTimeOffset.UtcNow, Interlocked.Increment(ref _sequenceCounter)),
             DelegatedBy = "cos-agent",
             DelegatedTo = delegatedTo,
             Description = "Test task",
