@@ -192,7 +192,7 @@ All unit tests use `InMemoryMessageBus` — no RabbitMQ required. Test with an `
 
 ## Alignment with Multi-Agent Orchestration Patterns
 
-Research into Claude Code's TeammateTool system and VoltAgent's meta-orchestration patterns validates that the harness architecture maps directly onto established multi-agent primitives:
+Research into Claude Code's TeammateTool system and community-sourced meta-orchestration patterns validates that the harness architecture maps directly onto established multi-agent primitives:
 
 | Research Primitive | Cortex Component |
 |-------------------|------------------|
@@ -241,80 +241,30 @@ The research patterns use file-based inboxes with polling. Cortex uses RabbitMQ,
 
 ## Future Orchestration Roadmap
 
-The following capabilities build on this harness foundation. Each is a separate future issue, documented here to ensure the foundation supports them.
+The following capabilities build on this harness foundation. Each is tracked as a separate GitHub issue. Full research backing is in the [Multi-Agent Orchestration Research Corpus](../research/README.md).
 
-### Task Dependency Graphs
+### Phase 2 — Orchestration Primitives
 
-**What:** Extend `DelegationRecord` with `BlockedBy` and `Blocks` collections. Add `FindBlockedAsync()` and auto-unblock logic when blockers complete.
+| Issue | Capability | Enables |
+|-------|-----------|---------|
+| [#11](https://github.com/dbhq-uk/cortex/issues/11) | **Task dependency DAG** — `BlockedBy`/`Blocks` on `DelegationRecord`, auto-unblock, `Failed` status | Pipeline, coordinated refactoring, map-reduce |
+| [#12](https://github.com/dbhq-uk/cortex/issues/12) | **Broadcast messaging** — team fanout exchange, `BroadcastAsync(envelope, teamId)` | Council (parallel specialists), team notifications |
+| [#13](https://github.com/dbhq-uk/cortex/issues/13) | **Coordination message types** — `TaskCompleted`, `PlanApproval`, `Shutdown`, `Idle`, `Join`, `ProgressUpdate` | Graceful shutdown, plan approval, team assembly |
+| [#14](https://github.com/dbhq-uk/cortex/issues/14) | **Team lifecycle management** — `ITeamRegistry`, assemble/activate/dissolve, team templates | All team-based orchestration patterns |
+| [#15](https://github.com/dbhq-uk/cortex/issues/15) | **Agent capability enrichment** — `ModelTier`, `PerformanceScore`, `CurrentWorkload`, `CostPerTask` | Cost-aware routing, intelligent agent selection |
 
-**Why:** Pipeline and coordinated refactoring patterns require tasks that wait for upstream work to finish before starting. The current flat delegation model has no dependency concept.
+### Phase 3 — Team Composition and Intelligence
 
-**Enables:** Sequential Pipeline, Coordinated Multi-File Refactoring patterns.
+| Issue | Capability | Enables |
+|-------|-----------|---------|
+| [#16](https://github.com/dbhq-uk/cortex/issues/16) | **TeamArchitectAgent** — analyses requirements, queries registry, assembles teams, monitors, re-plans, dissolves | "Build me a team and build this" |
+| [#17](https://github.com/dbhq-uk/cortex/issues/17) | **Orchestration engine** — DAG execution, saga patterns, checkpoint/restart, fork-join barriers | Complex multi-step business workflows |
+| [#18](https://github.com/dbhq-uk/cortex/issues/18) | **Error coordination** — per-agent circuit breakers, cascade prevention, graduated recovery, error taxonomy | Resilient multi-agent systems |
+| [#19](https://github.com/dbhq-uk/cortex/issues/19) | **Capability-based task distribution** — multi-factor routing, affinity, priority scheduling, load balancing | Automatic work distribution, SLA enforcement |
+| [#20](https://github.com/dbhq-uk/cortex/issues/20) | **Self-improving skills** — agent-generated skill definitions (Voyager pattern), semantic indexing, composition, verification | Adaptive, self-improving agent capabilities |
 
-### Team Lifecycle Management
+### Design Principle: Foundation Supports All Patterns
 
-**What:** Implement `ITeam` management — assemble teams, activate, dissolve. Track team membership in a `ITeamRegistry`. Wire team lifecycle to `AgentRuntime` (team assembly starts agents, team dissolution stops them).
+The harness architecture (`AgentHarness` per agent, `AgentRuntime` as lifecycle manager, `IAgentRegistry` for discovery, `IDelegationTracker` for state, RabbitMQ for messaging) was designed to support all of the above without structural changes. Each Phase 2/3 capability adds new services and message types on top of the existing foundation — it does not require modifying the harness core.
 
-**Why:** Multi-agent coordination requires grouping agents with shared context and coordinated lifecycle. `ITeam` and `TeamStatus` already exist as interfaces.
-
-**Enables:** All team-based orchestration patterns.
-
-### Broadcast Messaging
-
-**What:** Team fanout exchange in RabbitMQ topology. Each agent in a team gets bound to `team.{teamId}` fanout exchange. Add `BroadcastAsync(envelope, teamId)` to message bus.
-
-**Why:** Council pattern and team notifications require sending the same message to all team members simultaneously, rather than N individual publish calls.
-
-**Enables:** Council (Parallel Specialists), team-wide notifications.
-
-### Coordination Message Types
-
-**What:** Define standard coordination message types in `Cortex.Core.Messages.Coordination`:
-- `ShutdownRequest` / `ShutdownApproved` — graceful agent termination
-- `TaskCompletedNotification` — broadcast when task finishes
-- `PlanApprovalRequest` / `PlanApprovalResponse` — explicit plan gating
-- `IdleNotification` — agent reports it has no work
-- `JoinRequest` / `JoinApproved` — team membership requests
-
-**Why:** Structured coordination messages enable reliable orchestration protocols beyond simple request/reply. Maps to the 9 structured message types in Claude Code's system.
-
-**Enables:** Graceful shutdown, plan approval workflows, team assembly.
-
-### Swarm Pattern (Competing Consumers)
-
-**What:** Support shared work queue binding in `QueueTopology`. Multiple agents consume from `team.{teamId}.work` — RabbitMQ distributes messages round-robin across consumers. Workers claim tasks naturally through message consumption.
-
-**Why:** Self-organising swarm is the simplest parallelism pattern. No central coordinator needed — RabbitMQ's competing consumer model provides natural load balancing.
-
-**Enables:** Self-Organising Swarm pattern.
-
-### Error Coordination
-
-**What:** Circuit breaker state machine on `AgentHarness` (closed → open → half-open). Configurable failure thresholds. Cascade prevention via bulkhead isolation (errors in one agent don't propagate to others). Recovery strategies: immediate retry, delayed retry, alternative path, fallback.
-
-**Why:** Multi-agent systems need resilience. A failing agent should not bring down the team. The current nack-to-dead-letter mechanism handles individual message failures but not systemic agent failures.
-
-**Error taxonomy:** Infrastructure errors, application errors, integration failures, data errors, timeout errors, permission errors, resource exhaustion, external failures.
-
-**Enables:** Resilient multi-agent systems, graceful degradation.
-
-### Orchestration Engine
-
-**What:** `IOrchestrator` interface for complex workflow execution:
-- DAG execution with topological sorting
-- Saga patterns with compensation logic (rollback on failure)
-- Checkpoint/restart for workflow resumption
-- Fork-join synchronisation barriers
-- Conditional branching and loop handling
-
-**Why:** Complex business processes need coordinated multi-step workflows that go beyond simple request/reply or task delegation.
-
-**Enables:** Sequential Pipeline, Map-Reduce, Event-Driven Coordination, complex business workflows.
-
-### Capability-Based Task Distribution
-
-**What:** Runtime task routing that matches work to agents based on capabilities, availability, and load. Load-balanced assignment across agents with matching capabilities. Priority scheduling respecting SLA constraints.
-
-**Why:** As the number of agents grows, manual routing becomes impractical. The registry already supports `FindByCapabilityAsync` — this adds intelligent routing on top.
-
-**Enables:** Automatic work distribution, SLA enforcement, load balancing.
+The one exception is the per-consumer lifecycle (`IAsyncDisposable` from `StartConsumingAsync`) which was a foundational change made in Issue #2 specifically to enable multiple agents on one bus — a prerequisite for every multi-agent pattern.

@@ -143,13 +143,32 @@ Every message carries:
 
 ## Teams — Self-Assembly
 
-1. A goal arrives
-2. CoS analyses what skills are needed
-3. Team is created with reference code
-4. Agents pulled in by capability matching
-5. Work progresses through team queue
-6. Results land for human approval
-7. Team dissolves
+### Team Lifecycle
+
+1. A goal arrives (natural language or structured message)
+2. CoS (or TeamArchitectAgent) analyses what capabilities are needed
+3. Agent registry queried — capability matching, availability, workload, model tier
+4. Team is created with reference code and team queue topology
+5. Agents pulled in by capability matching; gaps identified and escalated
+6. Work progresses through team queue with delegation tracking
+7. Progress monitored — re-planning if team is stuck or blocked
+8. Results land for human approval (authority tier governs what needs approval)
+9. Team dissolves; agents released back to pool
+
+### Three Composition Approaches
+
+| Approach | How It Works | When to Use |
+|----------|-------------|-------------|
+| **Template-based** | Pre-defined team shapes (YAML/JSON) — e.g. "code review team", "research team" | Recurring, well-understood tasks |
+| **Manager-delegated** | Orchestrator agent (CoS or manager) decides who does what at runtime | Tasks with known structure but variable agents |
+| **Fully autonomous** | TeamArchitectAgent analyses requirements, discovers capabilities, assembles team from scratch | Novel tasks — "build me a team and build this" |
+
+### Composition Principles
+
+- **Context-centric decomposition** — split by context boundaries, not by job type. Each subagent handles a distinct context with minimal overlap.
+- **Verification subagent** — every team benefits from a dedicated verifier with focused tools operating in a clean context.
+- **Cost-aware model tiers** — heavyweight reasoning (Opus) for orchestrators and planners, balanced (Sonnet) for domain specialists, lightweight (Haiku) for high-volume operations.
+- **Authority governs composition decisions** — using an existing template is JustDoIt, composing a new team is DoItAndShowMe, creating a new agent type is AskMeFirst.
 
 ---
 
@@ -157,30 +176,45 @@ Every message carries:
 
 ### Phase 1 — The Spine
 
-- RabbitMQ + C# message bus abstraction
-- Agent interface with human and AI implementations
-- Authority claims model
-- Reference code tracking
-- CoS agent — basic triage and routing
-- Email listener and skill
-- Web UI
+Core infrastructure and first real agent. Everything communicates through the message bus.
 
-### Phase 2 — Teams and Mobile
+- RabbitMQ + C# message bus abstraction ✅
+- Agent harness and runtime (per-agent lifecycle, team support, dynamic creation) ✅
+- Authority claims model and enforcement
+- Reference code generator with persistent sequencing
+- CoS agent — orchestrator-worker triage and capability-based routing
+- Email listener (webhook ingest) and email analysis/draft skill
+- Web UI — channel sidebar, chat thread, actions panel
 
-- Dynamic team creation
-- Claude Code CLI wrapper
-- Multi-repo context loading
+### Phase 2 — Orchestration Primitives
+
+Enable multi-agent coordination patterns on top of the Phase 1 foundation.
+
+- Task dependency DAG — extend delegation records with `BlockedBy`/`Blocks`, auto-unblock
+- Broadcast messaging — team fanout exchange, `BroadcastAsync(envelope, teamId)`
+- Coordination message types — `TaskCompleted`, `PlanApprovalRequest`, `ShutdownRequest`, `IdleNotification`, `JoinRequest`
+- Team lifecycle management — `ITeamRegistry`, assemble/activate/dissolve, wired to `AgentRuntime`
+- Agent capability enrichment — model tier, performance scoring, workload tracking, cost-per-task
+- Claude Code CLI wrapper for AI agent execution
 - Mobile UI
-- Cost tracking
+- Cost tracking per reference code
 
-### Phase 3 — Self-Improvement and Scale
+### Phase 3 — Team Composition and Intelligence
 
-- Skill authoring agents
-- Team performance tracking
+The "build me a team and build this" capability. Agents that build, manage, and improve teams.
+
+- **TeamArchitectAgent** — analyses requirements, queries registry, assembles teams, monitors progress, re-plans if stuck, dissolves on completion
+- Orchestration engine — DAG execution with topological sort, saga patterns with compensation, checkpoint/restart, fork-join barriers
+- Error coordination — per-agent circuit breakers, cascade prevention, graduated recovery, error taxonomy
+- Capability-based task distribution — intelligent routing by capability + availability + load + performance score + SLA
+- Self-improving skills — agents generate new skill definitions (Voyager pattern), semantic indexing, skill composition, self-verification before registry admission
 - Dispute resolution skills
+- Team performance tracking and knowledge extraction
 
 ### Phase 4 — Productisation
 
 - Managed service infrastructure
 - Multi-tenant architecture
 - Pricing model
+- Agent economy primitives (task bidding, reputation scoring)
+- Gossip-based agent discovery for multi-instance deployments
