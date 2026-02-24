@@ -61,7 +61,7 @@ dotnet build src/Cortex.Core/Cortex.Core.csproj
 |------------------------------|---------------------------------------------|
 | `Cortex.Core.Messages`       | IMessage, MessageEnvelope, MessageContext    |
 | `Cortex.Core.Authority`      | AuthorityClaim, AuthorityTier, IAuthorityProvider |
-| `Cortex.Core.References`     | ReferenceCode value object, IReferenceCodeGenerator |
+| `Cortex.Core.References`     | ReferenceCode, IReferenceCodeGenerator, SequentialReferenceCodeGenerator, ISequenceStore, FileSequenceStore |
 | `Cortex.Core.Channels`       | IChannel, ChannelType                       |
 | `Cortex.Core.Teams`          | ITeam, TeamStatus                           |
 | `Cortex.Messaging`           | IMessageBus, IMessagePublisher, IMessageConsumer, InMemoryMessageBus |
@@ -96,7 +96,7 @@ dotnet build src/Cortex.Core/Cortex.Core.csproj
 
 ## Reference Code Format
 
-`CTX-YYYY-MMDD-NNN` (e.g. `CTX-2026-0221-001`)
+`CTX-YYYY-MMDD-NNN(N)` (e.g. `CTX-2026-0221-001`, overflow: `CTX-2026-0221-1000`)
 
 ## Authority Tiers
 
