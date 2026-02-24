@@ -8,5 +8,5 @@ public interface IReferenceCodeGenerator
     /// <summary>
     /// Generates a new unique reference code.
     /// </summary>
-    ReferenceCode Generate();
+    Task<ReferenceCode> GenerateAsync(CancellationToken cancellationToken = default);
 }
