@@ -24,4 +24,15 @@ public sealed record MessageContext
     /// The channel this message belongs to.
     /// </summary>
     public string? ChannelId { get; init; }
+
+    /// <summary>
+    /// Queue name where responses to this message should be sent.
+    /// </summary>
+    public string? ReplyTo { get; init; }
+
+    /// <summary>
+    /// The agent ID of the sender. Stamped by the agent harness on outbound messages.
+    /// Required for delegation tracking, approval workflows, and audit trails.
+    /// </summary>
+    public string? FromAgentId { get; init; }
 }
