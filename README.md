@@ -12,7 +12,7 @@
 
 **Humans and AI agents, collaborating as equals, running a business through code.**
 
-[Vision](#the-idea) | [Architecture](#architecture) | [Quick Start](#quick-start) | [Roadmap](#roadmap) | [Contributing](#contributing)
+[Vision](#the-idea) · [Architecture](#architecture) · [Quick Start](#quick-start) · [Roadmap](#roadmap) · [Contributing](#contributing)
 
 </div>
 
@@ -26,10 +26,6 @@ It's a **message-driven framework** where every real-world organisational concep
 
 > **Not a chatbot. Not a coding tool. A digital operating system for a company.**
 
-<br>
-
-<div align="center">
-
 | Concept | How Cortex Encodes It |
 |---|---|
 | **Delegation** | Messages flow through queues with authority claims attached |
@@ -39,40 +35,38 @@ It's a **message-driven framework** where every real-world organisational concep
 | **Accountability** | Every action traced via reference codes (`CTX-2026-0224-001`) |
 | **Succession** | Authority can be delegated, inherited, elevated, or revoked at runtime |
 
-</div>
-
-<br>
+---
 
 ## Architecture
 
 ```mermaid
 graph TB
-    subgraph "User Layer"
-        WEB["<b>Web UI</b>"]
-        MOB["<b>Mobile / WhatsApp</b>"]
+    subgraph User Layer
+        WEB[Web UI]
+        MOB[Mobile / WhatsApp]
     end
 
-    subgraph "Routing Layer"
-        COS["<b>Chief of Staff Agent</b><br/><i>triage &bull; route &bull; coordinate</i>"]
+    subgraph Routing Layer
+        COS[Chief of Staff Agent]
     end
 
-    subgraph "Message Bus &mdash; RabbitMQ"
-        FQ["Founder Queue"]
-        CQ["CoS Queue"]
-        SQ["Specialist Queues"]
-        TQ["Team Queues"]
-        DLQ["Dead Letter / Escalation"]
+    subgraph Message Bus - RabbitMQ
+        FQ[Founder Queue]
+        CQ[CoS Queue]
+        SQ[Specialist Queues]
+        TQ[Team Queues]
+        DLQ[Dead Letter / Escalation]
     end
 
-    subgraph "Agent Layer"
-        HA["Human Agents"]
-        AA["AI Agents"]
-        BA["Builder Agents"]
+    subgraph Agent Layer
+        HA[Human Agents]
+        AA[AI Agents]
+        BA[Builder Agents]
     end
 
-    subgraph "Skills"
-        SR["Skill Registry"]
-        SE["Skill Executors<br/><i>C# &bull; Python &bull; CLI &bull; API</i>"]
+    subgraph Skills
+        SR[Skill Registry]
+        SE[Skill Executors]
     end
 
     WEB --> CQ
@@ -88,9 +82,9 @@ graph TB
     SR --> SE
     DLQ --> FQ
 
-    style COS fill:#4a90d9,stroke:#2c5282,color:#ffffff
-    style DLQ fill:#e53e3e,stroke:#c53030,color:#ffffff
-    style FQ fill:#d69e2e,stroke:#b7791f,color:#ffffff
+    style COS fill:#4a90d9,stroke:#2c5282,color:#fff
+    style DLQ fill:#e53e3e,stroke:#c53030,color:#fff
+    style FQ fill:#d69e2e,stroke:#b7791f,color:#fff
 ```
 
 ### How Messages Flow
@@ -118,7 +112,7 @@ User sends "Draft a reply to the Acme proposal"
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐         │
 │  │ agent-01 │  │ agent-02 │  │ agent-03 │         │
 │  │ drafting │  │ research │  │ drafting │         │
-│  │ ✅ avail │  │ ❌ busy  │  │ ✅ avail │         │
+│  │ avail    │  │ busy     │  │ avail    │         │
 │  └──────────┘  └──────────┘  └──────────┘         │
 └─────────────────────────────────────────────────────┘
   │
@@ -129,13 +123,9 @@ User sends "Draft a reply to the Acme proposal"
   ▼  Authority = DoItAndShowMe → CoS presents to user for approval
 ```
 
-<br>
+---
 
 ## Key Concepts
-
-<table>
-<tr>
-<td width="50%">
 
 ### Authority Model
 
@@ -143,45 +133,11 @@ Not a simple permission system. Authority **flows as claims on every message** t
 
 | Tier | Meaning | Example |
 |------|---------|---------|
-| **Just Do It** | Internal, no footprint | Log, update, file |
-| **Do It and Show Me** | Execute, then present | Draft email, create plan |
-| **Ask Me First** | Needs approval first | Send email, spend money |
+| **Just Do It** | Internal, no external footprint | Log, update, file |
+| **Do It and Show Me** | Execute, then present for approval | Draft email, create plan |
+| **Ask Me First** | Needs explicit approval first | Send email, spend money |
 
-</td>
-<td width="50%">
-
-### Everything is a Skill
-
-Skills are **markdown files** wrapping any capability. Language-agnostic, discoverable, composable — and agents can author new ones.
-
-```markdown
-# email-draft
-## Trigger
-capability: drafting
-## Execute
-```csharp
-var draft = await EmailService
-  .AnalyseAndDraft(context);
-return draft;
-```
-```
-
-</td>
-</tr>
-<tr>
-<td>
-
-### Teams Self-Assemble
-
-1. A goal arrives
-2. CoS analyses what capabilities are needed
-3. Agent registry queried — match by skill, availability, model tier
-4. Team created with its own queue topology
-5. Work progresses with delegation tracking
-6. Team dissolves when goal is complete
-
-</td>
-<td>
+Authority isn't static — it can be elevated over time as trust builds, delegated to other humans, or inherited through succession.
 
 ### Humans = AI
 
@@ -193,17 +149,24 @@ public interface IAgent
     string AgentId { get; }
     string Name { get; }
     IReadOnlyList<AgentCapability> Capabilities { get; }
-    Task<MessageEnvelope?> ProcessAsync(
-        MessageEnvelope envelope,
-        CancellationToken ct = default);
+    Task<MessageEnvelope?> ProcessAsync(MessageEnvelope envelope, CancellationToken ct = default);
 }
 ```
 
-</td>
-</tr>
-</table>
+### Everything is a Skill
 
-<br>
+Skills are **markdown files** wrapping any capability — C#, Python, CLI, API. They're discoverable, composable, language-agnostic, and agents can author new ones at runtime.
+
+### Teams Self-Assemble
+
+1. A goal arrives (natural language or structured message)
+2. CoS analyses what capabilities are needed
+3. Agent registry queried — match by skill, availability, model tier
+4. Team created with its own queue topology and reference code
+5. Work progresses with delegation tracking
+6. Team dissolves when goal is complete
+
+---
 
 ## Quick Start
 
@@ -264,7 +227,6 @@ public class GreetingAgent : IAgent
     public Task<MessageEnvelope?> ProcessAsync(
         MessageEnvelope envelope, CancellationToken ct = default)
     {
-        // Your agent logic here
         var response = envelope with
         {
             Message = new GreetingResponse { Text = "Hello from Cortex!" }
@@ -276,7 +238,7 @@ public class GreetingAgent : IAgent
 
 The `AgentHarness` handles the rest — queue subscription, reply routing, `FromAgentId` stamping, and registry management.
 
-<br>
+---
 
 ## Project Structure
 
@@ -298,93 +260,7 @@ cortex/
     └── research/                   # Agent orchestration research
 ```
 
-<br>
-
-## Roadmap
-
-<table>
-<tr>
-<td align="center" width="25%">
-
-### Phase 1
-**The Spine**
-
-*In Progress*
-
-</td>
-<td>
-
-- [x] RabbitMQ message bus with topic exchange routing and dead letter escalation
-- [x] Agent harness and runtime — per-agent lifecycle, team support, dynamic creation
-- [x] Per-consumer lifecycle — `IAsyncDisposable` handles for independent consumer stop
-- [x] Reference code generator with persistent sequencing
-- [ ] Authority claim validation and enforcement
-- [ ] Chief of Staff agent — triage and capability-based routing
-- [ ] Email listener (webhook ingest) and email analysis/draft skill
-- [ ] Web UI — channel sidebar, chat thread, actions panel
-
-</td>
-</tr>
-<tr>
-<td align="center">
-
-### Phase 2
-**Orchestration**
-
-*Planned*
-
-</td>
-<td>
-
-- [ ] Task dependency DAG with auto-unblock
-- [ ] Broadcast messaging and team fanout
-- [ ] Coordination messages — `TaskCompleted`, `PlanApprovalRequest`, `ShutdownRequest`
-- [ ] Team lifecycle management — assemble, activate, dissolve
-- [ ] Claude Code CLI wrapper for AI agent execution
-- [ ] Cost tracking per reference code
-- [ ] Mobile UI
-
-</td>
-</tr>
-<tr>
-<td align="center">
-
-### Phase 3
-**Intelligence**
-
-*Planned*
-
-</td>
-<td>
-
-- [ ] **TeamArchitectAgent** — "build me a team and build this"
-- [ ] Orchestration engine — DAG execution, saga patterns, checkpoint/restart
-- [ ] Self-improving skills — agents generate new skill definitions
-- [ ] Dispute resolution and arbitration
-- [ ] Capability-based intelligent routing (availability + load + performance)
-
-</td>
-</tr>
-<tr>
-<td align="center">
-
-### Phase 4
-**Product**
-
-*Future*
-
-</td>
-<td>
-
-- [ ] Managed service infrastructure and multi-tenant architecture
-- [ ] Agent economy — task bidding, reputation scoring
-- [ ] Gossip-based agent discovery for multi-instance deployments
-
-</td>
-</tr>
-</table>
-
-<br>
+---
 
 ## What's Built So Far
 
@@ -397,15 +273,54 @@ cortex/
 
 **74 tests. Zero warnings. Warnings-as-errors enforced.**
 
-<br>
+---
+
+## Roadmap
+
+### Phase 1 — The Spine *(in progress)*
+
+- [x] RabbitMQ message bus with topic exchange routing and dead letter escalation
+- [x] Agent harness and runtime — per-agent lifecycle, team support, dynamic creation
+- [x] Per-consumer lifecycle — `IAsyncDisposable` handles for independent consumer stop
+- [x] Reference code generator with persistent sequencing
+- [ ] Authority claim validation and enforcement
+- [ ] Chief of Staff agent — triage and capability-based routing
+- [ ] Email listener (webhook ingest) and email analysis/draft skill
+- [ ] Web UI — channel sidebar, chat thread, actions panel
+
+### Phase 2 — Orchestration
+
+- [ ] Task dependency DAG with auto-unblock
+- [ ] Broadcast messaging and team fanout
+- [ ] Coordination messages — `TaskCompleted`, `PlanApprovalRequest`, `ShutdownRequest`
+- [ ] Team lifecycle management — assemble, activate, dissolve
+- [ ] Claude Code CLI wrapper for AI agent execution
+- [ ] Cost tracking per reference code
+- [ ] Mobile UI
+
+### Phase 3 — Intelligence
+
+- [ ] **TeamArchitectAgent** — "build me a team and build this"
+- [ ] Orchestration engine — DAG execution, saga patterns, checkpoint/restart
+- [ ] Self-improving skills — agents generate new skill definitions
+- [ ] Dispute resolution and arbitration
+- [ ] Capability-based intelligent routing (availability + load + performance)
+
+### Phase 4 — Product
+
+- [ ] Managed service infrastructure and multi-tenant architecture
+- [ ] Agent economy — task bidding, reputation scoring
+- [ ] Gossip-based agent discovery for multi-instance deployments
+
+See the [vision document](docs/architecture/vision.md) for the full roadmap.
+
+---
 
 ## Built with AI
 
 This project is developed using AI-assisted workflows, including [Claude Code](https://docs.anthropic.com/en/docs/claude-code) for architecture, implementation, and code review. The [research documentation](docs/research/) covers cutting-edge multi-agent orchestration patterns that inform the design.
 
-See [CLAUDE.md](CLAUDE.md) for how AI tooling is integrated into the development process.
-
-AI-assisted contributions are welcome and encouraged.
+See [CLAUDE.md](CLAUDE.md) for how AI tooling is integrated into the development process. AI-assisted contributions are welcome and encouraged.
 
 ## Contributing
 
@@ -415,4 +330,4 @@ We'd love your help. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
-[GNU Affero General Public License v3.0](LICENSE) -- Copyright (C) 2026 Daniel Grimes / [dbhq-uk](https://github.com/dbhq-uk)
+[GNU Affero General Public License v3.0](LICENSE) — Copyright (C) 2026 Daniel Grimes / [dbhq-uk](https://github.com/dbhq-uk)
