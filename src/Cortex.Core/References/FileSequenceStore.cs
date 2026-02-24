@@ -71,7 +71,9 @@ public sealed class FileSequenceStore : ISequenceStore
         };
 
         var json = JsonSerializer.Serialize(data, JsonOptions);
-        await File.WriteAllTextAsync(_filePath, json, cancellationToken);
+        var tempPath = _filePath + ".tmp";
+        await File.WriteAllTextAsync(tempPath, json, cancellationToken);
+        File.Move(tempPath, _filePath, overwrite: true);
     }
 
     private sealed class FileData
