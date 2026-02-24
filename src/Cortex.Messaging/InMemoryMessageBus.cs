@@ -11,8 +11,7 @@ namespace Cortex.Messaging;
 public sealed class InMemoryMessageBus : IMessageBus, IAsyncDisposable
 {
     private readonly ConcurrentDictionary<string, Channel<MessageEnvelope>> _queues = new();
-    private readonly List<CancellationTokenSource> _consumers = [];
-    private readonly object _consumersLock = new();
+    private readonly ConcurrentBag<ConsumerHandle> _consumers = [];
 
     /// <inheritdoc />
     public Task PublishAsync(
@@ -30,7 +29,7 @@ public sealed class InMemoryMessageBus : IMessageBus, IAsyncDisposable
     }
 
     /// <inheritdoc />
-    public Task StartConsumingAsync(
+    public Task<IAsyncDisposable> StartConsumingAsync(
         string queueName,
         Func<MessageEnvelope, Task> handler,
         CancellationToken cancellationToken = default)
@@ -43,31 +42,21 @@ public sealed class InMemoryMessageBus : IMessageBus, IAsyncDisposable
 
         var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
-        lock (_consumersLock)
-        {
-            _consumers.Add(cts);
-        }
+        var handle = new ConsumerHandle(cts);
+        _consumers.Add(handle);
 
         _ = ConsumeLoopAsync(channel.Reader, handler, cts.Token);
 
-        return Task.CompletedTask;
+        return Task.FromResult<IAsyncDisposable>(handle);
     }
 
     /// <inheritdoc />
-    public Task StopConsumingAsync(CancellationToken cancellationToken = default)
+    public async Task StopConsumingAsync(CancellationToken cancellationToken = default)
     {
-        lock (_consumersLock)
+        foreach (var handle in _consumers)
         {
-            foreach (var cts in _consumers)
-            {
-                cts.Cancel();
-                cts.Dispose();
-            }
-
-            _consumers.Clear();
+            await handle.DisposeAsync();
         }
-
-        return Task.CompletedTask;
     }
 
     /// <inheritdoc />
@@ -112,6 +101,20 @@ public sealed class InMemoryMessageBus : IMessageBus, IAsyncDisposable
         catch (OperationCanceledException)
         {
             // Normal shutdown — consumer was stopped.
+        }
+    }
+
+    private sealed class ConsumerHandle(CancellationTokenSource cts) : IAsyncDisposable
+    {
+        private int _disposed;
+
+        public async ValueTask DisposeAsync()
+        {
+            if (Interlocked.CompareExchange(ref _disposed, 1, 0) == 0)
+            {
+                await cts.CancelAsync();
+                cts.Dispose();
+            }
         }
     }
 }

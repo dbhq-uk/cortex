@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -19,8 +20,7 @@ public sealed class RabbitMqMessageBus : IMessageBus, IAsyncDisposable
 
     private IChannel? _publishChannel;
     private readonly SemaphoreSlim _publishChannelLock = new(1, 1);
-    private readonly List<(IChannel Channel, string ConsumerTag)> _consumers = [];
-    private readonly object _consumersLock = new();
+    private readonly ConcurrentBag<ConsumerHandle> _consumers = [];
     private bool _topologyDeclared;
     private bool _disposed;
 
@@ -95,7 +95,7 @@ public sealed class RabbitMqMessageBus : IMessageBus, IAsyncDisposable
     }
 
     /// <inheritdoc />
-    public async Task StartConsumingAsync(
+    public async Task<IAsyncDisposable> StartConsumingAsync(
         string queueName,
         Func<MessageEnvelope, Task> handler,
         CancellationToken cancellationToken = default)
@@ -177,39 +177,22 @@ public sealed class RabbitMqMessageBus : IMessageBus, IAsyncDisposable
             consumer: consumer,
             cancellationToken: cancellationToken);
 
-        lock (_consumersLock)
-        {
-            _consumers.Add((channel, consumerTag));
-        }
+        var handle = new ConsumerHandle(channel, consumerTag, _logger);
+        _consumers.Add(handle);
 
         _logger.LogInformation(
             "Started consuming from queue {QueueName} with consumer {ConsumerTag}",
             queueName, consumerTag);
+
+        return handle;
     }
 
     /// <inheritdoc />
     public async Task StopConsumingAsync(CancellationToken cancellationToken = default)
     {
-        List<(IChannel Channel, string ConsumerTag)> consumersToStop;
-
-        lock (_consumersLock)
+        foreach (var handle in _consumers)
         {
-            consumersToStop = [.. _consumers];
-            _consumers.Clear();
-        }
-
-        foreach (var (channel, consumerTag) in consumersToStop)
-        {
-            try
-            {
-                await channel.BasicCancelAsync(consumerTag, cancellationToken: cancellationToken);
-                await channel.CloseAsync(cancellationToken: cancellationToken);
-                channel.Dispose();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error stopping consumer {ConsumerTag}", consumerTag);
-            }
+            await handle.DisposeAsync();
         }
 
         _logger.LogInformation("All consumers stopped");
@@ -335,5 +318,33 @@ public sealed class RabbitMqMessageBus : IMessageBus, IAsyncDisposable
         _logger.LogInformation(
             "Declared RabbitMQ topology: exchanges {Exchange}, {DeadLetterExchange}",
             _options.ExchangeName, _options.DeadLetterExchangeName);
+    }
+
+    /// <summary>
+    /// Handle for an individual consumer that can be disposed independently.
+    /// </summary>
+    private sealed class ConsumerHandle(
+        IChannel channel,
+        string consumerTag,
+        ILogger logger) : IAsyncDisposable
+    {
+        private int _disposed;
+
+        public async ValueTask DisposeAsync()
+        {
+            if (Interlocked.CompareExchange(ref _disposed, 1, 0) == 0)
+            {
+                try
+                {
+                    await channel.BasicCancelAsync(consumerTag);
+                    await channel.CloseAsync();
+                    channel.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Error stopping consumer {ConsumerTag}", consumerTag);
+                }
+            }
+        }
     }
 }
