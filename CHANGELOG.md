@@ -44,3 +44,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - ServiceCollectionExtensions: `AddCortexAgentRuntime()` DI registration
 - ReplyTo and FromAgentId fields on MessageContext for request/reply patterns and sender identity
 - Per-consumer lifecycle on IMessageConsumer via IAsyncDisposable handles (breaking change)
+- `ISequenceStore` interface for pluggable sequence persistence
+- `InMemorySequenceStore` for testing and local development
+- `FileSequenceStore` with configurable file path for production persistence
+- `SequentialReferenceCodeGenerator` implementing `IReferenceCodeGenerator` with daily reset and thread safety
+- `SequenceState` record for sequence date and number tracking
+- `FileSequenceStoreOptions` for configuring file-based persistence path
+
+### Changed
+
+- `IReferenceCodeGenerator.Generate()` → `GenerateAsync(CancellationToken)` (async)
+- `ReferenceCode` now supports 3-4 digit sequences (overflow from 999 to 9999)
+- Bumped `Microsoft.Extensions.*` packages to 10.0.3 across all projects
