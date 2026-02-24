@@ -197,4 +197,27 @@ public sealed class InMemoryMessageBusTests
         await Assert.ThrowsAsync<ArgumentNullException>(
             () => bus.StartConsumingAsync("queue", null!));
     }
+
+    [Fact]
+    public async Task StartConsumingAsync_ReturnsDisposableHandle_ThatStopsOnlyItsConsumer()
+    {
+        var bus = new InMemoryMessageBus();
+        var received2 = new TaskCompletionSource<MessageEnvelope>();
+
+        var handle1 = await bus.StartConsumingAsync("queue-1", _ => Task.CompletedTask);
+
+        await bus.StartConsumingAsync("queue-2", envelope =>
+        {
+            received2.TrySetResult(envelope);
+            return Task.CompletedTask;
+        });
+
+        // Stop only consumer 1
+        await handle1.DisposeAsync();
+
+        // Consumer 2 should still work
+        await bus.PublishAsync(CreateEnvelope("still-alive"), "queue-2");
+        var result = await received2.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("still-alive", ((TestMessage)result.Message).Content);
+    }
 }
