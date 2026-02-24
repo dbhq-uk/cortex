@@ -3,14 +3,13 @@
 **Date:** 2026-02-23
 **Purpose:** Analyse external multi-agent orchestration patterns and map them to Cortex's architecture before implementing issue #2 (agent harness).
 
+> **Part of the [Multi-Agent Orchestration Research Corpus](./README.md).** This is the foundation document. For deeper framework analysis see [Deep Research](./2026-02-24-agent-orchestration-deep-research.md) and [Swarm Frameworks](./2026-02-24-agent-swarm-frameworks.md). For team composition see [Team-Building Agents](./2026-02-24-team-building-agents.md).
+
 ## Sources
 
 - [Claude Code Swarm Orchestration Skill](https://gist.github.com/kieranklaassen/4f2aba89594a4aea4ad64d753984b2ea) — Kieran Klaassen
 - [Claude Code's Hidden Multi-Agent System](https://paddo.dev/blog/claude-code-hidden-swarm/) — paddo.dev
-- [VoltAgent awesome-claude-code-subagents: agent-organizer](https://github.com/VoltAgent/awesome-claude-code-subagents/blob/main/categories/09-meta-orchestration/agent-organizer.md)
-- [VoltAgent: multi-agent-coordinator](https://github.com/VoltAgent/awesome-claude-code-subagents/blob/main/categories/09-meta-orchestration/multi-agent-coordinator.md)
-- [VoltAgent: error-coordinator](https://github.com/VoltAgent/awesome-claude-code-subagents/blob/main/categories/09-meta-orchestration/error-coordinator.md)
-- [VoltAgent: workflow-orchestrator](https://github.com/VoltAgent/awesome-claude-code-subagents/blob/main/categories/09-meta-orchestration/workflow-orchestrator.md)
+- Community-sourced meta-orchestration prompt patterns (agent-organiser, multi-agent-coordinator, error-coordinator, workflow-orchestrator)
 
 ---
 
@@ -60,7 +59,7 @@ Tasks have dependency management via `blockedBy`/`blocks`:
 - `write` — direct to specific agent inbox
 - `broadcast` — to all team members (N messages)
 
-### 1.5 Error Coordination (VoltAgent)
+### 1.5 Error Coordination Patterns
 
 - **Circuit breakers**: closed → open → half-open state machine
 - **Bulkhead isolation**: contain failures within service boundaries
@@ -68,7 +67,7 @@ Tasks have dependency management via `blockedBy`/`blocks`:
 - **Recovery strategies**: immediate retry, delayed retry, alternative path, cached fallback, manual intervention
 - **Error taxonomy**: infrastructure, application, integration, data, timeout, permission, resource exhaustion, external
 
-### 1.6 Multi-Agent Coordination (VoltAgent)
+### 1.6 Multi-Agent Coordination Patterns
 
 - **DAG execution** with topological sorting
 - **Saga patterns** with compensation logic
