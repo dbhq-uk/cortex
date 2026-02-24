@@ -51,11 +51,39 @@ public class ReferenceCodeTests
     }
 
     [Fact]
-    public void Create_WithSequenceOver999_Throws()
+    public void Create_WithSequenceOver999_ProducesFourDigitFormat()
+    {
+        var date = new DateTimeOffset(2026, 2, 24, 0, 0, 0, TimeSpan.Zero);
+
+        var code = ReferenceCode.Create(date, 1000);
+
+        Assert.Equal("CTX-2026-0224-1000", code.Value);
+    }
+
+    [Fact]
+    public void Create_WithMaxExtendedSequence_Succeeds()
     {
         var date = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
-        Assert.Throws<ArgumentOutOfRangeException>(() => ReferenceCode.Create(date, 1000));
+        var code = ReferenceCode.Create(date, 9999);
+
+        Assert.Equal("CTX-2026-0101-9999", code.Value);
+    }
+
+    [Fact]
+    public void Create_WithSequenceOver9999_Throws()
+    {
+        var date = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => ReferenceCode.Create(date, 10000));
+    }
+
+    [Fact]
+    public void Constructor_WithFourDigitSequence_Succeeds()
+    {
+        var code = new ReferenceCode("CTX-2026-0224-1000");
+
+        Assert.Equal("CTX-2026-0224-1000", code.Value);
     }
 
     [Fact]
@@ -84,7 +112,6 @@ public class ReferenceCodeTests
     [InlineData("INVALID")]
     [InlineData("CTX-2026-0221")]
     [InlineData("CTX-2026-0221-01")]
-    [InlineData("CTX-2026-0221-0001")]
     [InlineData("ABC-2026-0221-001")]
     [InlineData("CTX-26-0221-001")]
     public void Constructor_WithInvalidFormat_Throws(string value)
