@@ -45,4 +45,10 @@ public sealed record SkillDefinition
     /// Version of this skill definition.
     /// </summary>
     public string Version { get; init; } = "1.0.0";
+
+    /// <summary>
+    /// Raw content of the skill definition file, loaded at registration time.
+    /// Used by executors to extract prompts and configuration.
+    /// </summary>
+    public string? Content { get; init; }
 }
