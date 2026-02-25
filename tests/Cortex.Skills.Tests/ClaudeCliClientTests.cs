@@ -44,7 +44,7 @@ public sealed class ClaudeCliClientTests
     }
 
     [Fact]
-    [Trait("Category", "Integration")]
+    [Trait("Category", "RequiresClaude")]
     public async Task CompleteAsync_SimplePrompt_ReturnsNonEmptyResponse()
     {
         var client = new ClaudeCliClient(
