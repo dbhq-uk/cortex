@@ -89,38 +89,24 @@ graph TB
 
 ### How Messages Flow
 
-```
-User sends "Draft a reply to the Acme proposal"
-  │
-  ▼
-┌─────────────────────────────────────────────────────┐
-│  CoS Queue                                          │
-│  ┌───────────────────────────────────────────────┐  │
-│  │ MessageEnvelope                               │  │
-│  │   Message: "Draft a reply to the Acme..."     │  │
-│  │   ReferenceCode: CTX-2026-0224-042            │  │
-│  │   Authority: DoItAndShowMe                    │  │
-│  │   Context.ReplyTo: agent.cos-agent            │  │
-│  │   Context.FromAgentId: web-ui                 │  │
-│  └───────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────┘
-  │
-  ▼  CoS triages → needs "drafting" capability
-  │
-┌─────────────────────────────────────────────────────┐
-│  Agent Registry                                     │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐         │
-│  │ agent-01 │  │ agent-02 │  │ agent-03 │         │
-│  │ drafting │  │ research │  │ drafting │         │
-│  │ avail    │  │ busy     │  │ avail    │         │
-│  └──────────┘  └──────────┘  └──────────┘         │
-└─────────────────────────────────────────────────────┘
-  │
-  ▼  Routed to agent-01's queue
-  │
-  Agent processes → returns draft → reply published to CoS
-  │
-  ▼  Authority = DoItAndShowMe → CoS presents to user for approval
+```mermaid
+sequenceDiagram
+    actor User
+    participant CoS as Chief of Staff
+    participant Registry as Agent Registry
+    participant Agent as agent-01 (drafting)
+
+    User->>CoS: "Draft a reply to the Acme proposal"
+    Note over CoS: MessageEnvelope<br/>Ref: CTX-2026-0224-042<br/>Authority: DoItAndShowMe
+
+    CoS->>Registry: Find agents with "drafting" capability
+    Registry-->>CoS: agent-01 (available), agent-03 (available)
+
+    CoS->>Agent: Route message to agent-01's queue
+    Agent-->>CoS: Returns draft reply
+
+    Note over CoS: Authority = DoItAndShowMe
+    CoS-->>User: Present draft for approval
 ```
 
 ---
