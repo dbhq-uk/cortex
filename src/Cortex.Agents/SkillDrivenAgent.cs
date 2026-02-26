@@ -200,12 +200,101 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
         return null;
     }
 
-    private Task<MessageEnvelope?> RouteWorkflowAsync(
+    private async Task<MessageEnvelope?> RouteWorkflowAsync(
         MessageEnvelope envelope,
         DecompositionResult decomposition,
         CancellationToken cancellationToken)
     {
-        throw new NotImplementedException("Workflow routing not yet implemented");
+        var maxInbound = GetMaxAuthorityTier(envelope);
+        var parentRefCode = await _referenceCodeGenerator.GenerateAsync(cancellationToken);
+        var subtaskRefCodes = new List<ReferenceCode>();
+
+        // Pre-validate: ensure all capabilities have agents before creating any delegations
+        foreach (var task in decomposition.Tasks)
+        {
+            var candidates = await _agentRegistry.FindByCapabilityAsync(task.Capability, cancellationToken);
+            var filtered = candidates.Where(a => a.AgentId != AgentId).ToList();
+
+            if (filtered.Count == 0)
+            {
+                await EscalateAsync(
+                    envelope,
+                    $"Cannot decompose: no agent with capability '{task.Capability}'",
+                    cancellationToken);
+                return null;
+            }
+        }
+
+        // All capabilities valid — create delegations and publish
+        foreach (var task in decomposition.Tasks)
+        {
+            if (!Enum.TryParse<AuthorityTier>(task.AuthorityTier, ignoreCase: true, out var taskAuthority))
+            {
+                taskAuthority = AuthorityTier.JustDoIt;
+            }
+
+            var effectiveTier = (AuthorityTier)Math.Min((int)taskAuthority, (int)maxInbound);
+
+            var candidates = await _agentRegistry.FindByCapabilityAsync(task.Capability, cancellationToken);
+            var target = candidates.First(a => a.AgentId != AgentId);
+
+            var childRefCode = await _referenceCodeGenerator.GenerateAsync(cancellationToken);
+            subtaskRefCodes.Add(childRefCode);
+
+            await _delegationTracker.DelegateAsync(new DelegationRecord
+            {
+                ReferenceCode = childRefCode,
+                DelegatedBy = AgentId,
+                DelegatedTo = target.AgentId,
+                Description = task.Description,
+                Status = DelegationStatus.Assigned,
+                AssignedAt = DateTimeOffset.UtcNow
+            }, cancellationToken);
+
+            var childEnvelope = envelope with
+            {
+                ReferenceCode = childRefCode,
+                AuthorityClaims =
+                [
+                    new AuthorityClaim
+                    {
+                        GrantedBy = AgentId,
+                        GrantedTo = target.AgentId,
+                        Tier = effectiveTier,
+                        GrantedAt = DateTimeOffset.UtcNow
+                    }
+                ],
+                Context = envelope.Context with
+                {
+                    ParentMessageId = envelope.Message.MessageId,
+                    FromAgentId = AgentId,
+                    ReplyTo = $"agent.{AgentId}",
+                    OriginalGoal = decomposition.Summary
+                }
+            };
+
+            await _messagePublisher.PublishAsync(childEnvelope, $"agent.{target.AgentId}", cancellationToken);
+
+            _logger.LogInformation(
+                "Workflow {ParentRef}: dispatched {ChildRef} to {Target} (capability: {Capability})",
+                parentRefCode, childRefCode, target.AgentId, task.Capability);
+        }
+
+        // Create workflow record
+        var workflow = new WorkflowRecord
+        {
+            ReferenceCode = parentRefCode,
+            OriginalEnvelope = envelope,
+            SubtaskReferenceCodes = subtaskRefCodes,
+            Summary = decomposition.Summary
+        };
+        await _workflowTracker.CreateAsync(workflow, cancellationToken);
+
+        _logger.LogInformation(
+            "Created workflow {ParentRef} with {Count} sub-tasks",
+            parentRefCode, subtaskRefCodes.Count);
+
+        return null;
     }
 
     private async Task EscalateAsync(

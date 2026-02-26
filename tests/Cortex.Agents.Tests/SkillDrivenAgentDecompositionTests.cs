@@ -281,6 +281,173 @@ public sealed class SkillDrivenAgentDecompositionTests : IAsyncDisposable
         Assert.NotNull(msg);
     }
 
+    // --- Multi-task decomposition ---
+
+    [Fact]
+    public async Task ProcessAsync_MultiTask_PublishesToMultipleAgents()
+    {
+        RegisterDecomposeSkill();
+        SetDecomposeResult(new
+        {
+            tasks = new[]
+            {
+                new { capability = "data-analysis", description = "Gather metrics", authorityTier = "JustDoIt" },
+                new { capability = "drafting", description = "Write narrative", authorityTier = "DoItAndShowMe" }
+            },
+            summary = "Quarterly report",
+            confidence = 0.9
+        });
+        await RegisterSpecialistAgent("analyst", "data-analysis");
+        await RegisterSpecialistAgent("writer", "drafting");
+
+        var routedToAnalyst = new TaskCompletionSource<MessageEnvelope>();
+        var routedToWriter = new TaskCompletionSource<MessageEnvelope>();
+        await _bus.StartConsumingAsync("agent.analyst", e =>
+        {
+            routedToAnalyst.SetResult(e);
+            return Task.CompletedTask;
+        });
+        await _bus.StartConsumingAsync("agent.writer", e =>
+        {
+            routedToWriter.SetResult(e);
+            return Task.CompletedTask;
+        });
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(CreateEnvelope("Prepare quarterly report"));
+
+        var analystMsg = await routedToAnalyst.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var writerMsg = await routedToWriter.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotNull(analystMsg);
+        Assert.NotNull(writerMsg);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_MultiTask_CreatesWorkflowRecord()
+    {
+        RegisterDecomposeSkill();
+        SetDecomposeResult(new
+        {
+            tasks = new[]
+            {
+                new { capability = "data-analysis", description = "Gather metrics", authorityTier = "JustDoIt" },
+                new { capability = "drafting", description = "Write narrative", authorityTier = "DoItAndShowMe" }
+            },
+            summary = "Quarterly report",
+            confidence = 0.9
+        });
+        await RegisterSpecialistAgent("analyst", "data-analysis");
+        await RegisterSpecialistAgent("writer", "drafting");
+
+        await _bus.StartConsumingAsync("agent.analyst", _ => Task.CompletedTask);
+        await _bus.StartConsumingAsync("agent.writer", _ => Task.CompletedTask);
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(CreateEnvelope("Prepare quarterly report"));
+
+        var analystDelegations = await _delegationTracker.GetByAssigneeAsync("analyst");
+        Assert.Single(analystDelegations);
+        var subtaskRef = analystDelegations[0].ReferenceCode;
+
+        var workflow = await _workflowTracker.FindBySubtaskAsync(subtaskRef);
+        Assert.NotNull(workflow);
+        Assert.Equal("Quarterly report", workflow.Summary);
+        Assert.Equal(2, workflow.SubtaskReferenceCodes.Count);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_MultiTask_CreatesDelegationPerSubtask()
+    {
+        RegisterDecomposeSkill();
+        SetDecomposeResult(new
+        {
+            tasks = new[]
+            {
+                new { capability = "data-analysis", description = "Gather metrics", authorityTier = "JustDoIt" },
+                new { capability = "drafting", description = "Write narrative", authorityTier = "DoItAndShowMe" }
+            },
+            summary = "Quarterly report",
+            confidence = 0.9
+        });
+        await RegisterSpecialistAgent("analyst", "data-analysis");
+        await RegisterSpecialistAgent("writer", "drafting");
+
+        await _bus.StartConsumingAsync("agent.analyst", _ => Task.CompletedTask);
+        await _bus.StartConsumingAsync("agent.writer", _ => Task.CompletedTask);
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(CreateEnvelope("Prepare quarterly report"));
+
+        var analystDelegations = await _delegationTracker.GetByAssigneeAsync("analyst");
+        var writerDelegations = await _delegationTracker.GetByAssigneeAsync("writer");
+        Assert.Single(analystDelegations);
+        Assert.Single(writerDelegations);
+        Assert.Equal("Gather metrics", analystDelegations[0].Description);
+        Assert.Equal("Write narrative", writerDelegations[0].Description);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_MultiTask_SetsReplyToCoS()
+    {
+        RegisterDecomposeSkill();
+        SetDecomposeResult(new
+        {
+            tasks = new[]
+            {
+                new { capability = "data-analysis", description = "Gather metrics", authorityTier = "JustDoIt" },
+                new { capability = "drafting", description = "Write narrative", authorityTier = "DoItAndShowMe" }
+            },
+            summary = "Quarterly report",
+            confidence = 0.9
+        });
+        await RegisterSpecialistAgent("analyst", "data-analysis");
+        await RegisterSpecialistAgent("writer", "drafting");
+
+        var routedToAnalyst = new TaskCompletionSource<MessageEnvelope>();
+        await _bus.StartConsumingAsync("agent.analyst", e =>
+        {
+            routedToAnalyst.SetResult(e);
+            return Task.CompletedTask;
+        });
+        await _bus.StartConsumingAsync("agent.writer", _ => Task.CompletedTask);
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(CreateEnvelope("Prepare quarterly report", replyTo: "agent.requester"));
+
+        var msg = await routedToAnalyst.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("agent.cos", msg.Context.ReplyTo);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_MultiTask_PartialCapabilityFailure_Escalates()
+    {
+        RegisterDecomposeSkill();
+        SetDecomposeResult(new
+        {
+            tasks = new[]
+            {
+                new { capability = "data-analysis", description = "Gather metrics", authorityTier = "JustDoIt" },
+                new { capability = "nonexistent", description = "Unknown task", authorityTier = "JustDoIt" }
+            },
+            summary = "Mixed report",
+            confidence = 0.9
+        });
+        await RegisterSpecialistAgent("analyst", "data-analysis");
+
+        var escalated = new TaskCompletionSource<MessageEnvelope>();
+        await _bus.StartConsumingAsync("agent.founder", e =>
+        {
+            escalated.SetResult(e);
+            return Task.CompletedTask;
+        });
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(CreateEnvelope("Mixed request"));
+
+        var msg = await escalated.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotNull(msg);
+    }
+
     public async ValueTask DisposeAsync()
     {
         _refCodeGenerator.Dispose();
