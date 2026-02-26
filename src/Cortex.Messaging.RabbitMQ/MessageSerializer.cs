@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Cortex.Core.Authority;
 using Cortex.Core.Messages;
 using Cortex.Core.References;
 
@@ -34,6 +35,7 @@ public static class MessageSerializer
         {
             Message = JsonSerializer.SerializeToElement(envelope.Message, envelope.Message.GetType(), BaseOptions),
             ReferenceCode = envelope.ReferenceCode.Value,
+            AuthorityClaims = envelope.AuthorityClaims.Count > 0 ? envelope.AuthorityClaims : null,
             Context = envelope.Context,
             Priority = envelope.Priority,
             Sla = envelope.Sla
@@ -74,6 +76,7 @@ public static class MessageSerializer
             {
                 Message = message,
                 ReferenceCode = new ReferenceCode(wire.ReferenceCode),
+                AuthorityClaims = wire.AuthorityClaims ?? [],
                 Context = wire.Context ?? new MessageContext(),
                 Priority = wire.Priority,
                 Sla = wire.Sla
@@ -94,6 +97,7 @@ public static class MessageSerializer
     {
         public JsonElement Message { get; init; }
         public string ReferenceCode { get; init; } = "";
+        public IReadOnlyList<AuthorityClaim>? AuthorityClaims { get; init; }
         public MessageContext? Context { get; init; }
         public MessagePriority Priority { get; init; } = MessagePriority.Normal;
         public TimeSpan? Sla { get; init; }
