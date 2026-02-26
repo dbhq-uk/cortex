@@ -1,3 +1,4 @@
+using Cortex.Core.Authority;
 using Cortex.Core.Messages;
 using Cortex.Core.References;
 
@@ -116,5 +117,93 @@ public sealed class MessageSerializerTests
     public void Serialize_NullEnvelope_ThrowsArgumentNullException()
     {
         Assert.Throws<ArgumentNullException>(() => MessageSerializer.Serialize(null!));
+    }
+
+    [Fact]
+    public void RoundTrip_PreservesSingleAuthorityClaim()
+    {
+        var original = CreateEnvelope("auth-single") with
+        {
+            AuthorityClaims =
+            [
+                new AuthorityClaim
+                {
+                    GrantedBy = "user-1",
+                    GrantedTo = "agent-1",
+                    Tier = AuthorityTier.DoItAndShowMe,
+                    GrantedAt = DateTimeOffset.UtcNow
+                }
+            ]
+        };
+
+        var (body, messageType) = MessageSerializer.Serialize(original);
+        var deserialized = MessageSerializer.Deserialize(body, messageType);
+
+        Assert.NotNull(deserialized);
+        Assert.Single(deserialized.AuthorityClaims);
+        var claim = deserialized.AuthorityClaims[0];
+        Assert.Equal("user-1", claim.GrantedBy);
+        Assert.Equal("agent-1", claim.GrantedTo);
+        Assert.Equal(AuthorityTier.DoItAndShowMe, claim.Tier);
+    }
+
+    [Fact]
+    public void RoundTrip_PreservesEmptyAuthorityClaims()
+    {
+        var original = CreateEnvelope("auth-empty");
+
+        var (body, messageType) = MessageSerializer.Serialize(original);
+        var deserialized = MessageSerializer.Deserialize(body, messageType);
+
+        Assert.NotNull(deserialized);
+        Assert.Empty(deserialized.AuthorityClaims);
+    }
+
+    [Fact]
+    public void RoundTrip_PreservesMultipleAuthorityClaimsWithExpiry()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var expiry = now.AddHours(4);
+        var original = CreateEnvelope("auth-multi") with
+        {
+            AuthorityClaims =
+            [
+                new AuthorityClaim
+                {
+                    GrantedBy = "owner",
+                    GrantedTo = "cos-agent",
+                    Tier = AuthorityTier.AskMeFirst,
+                    PermittedActions = ["send-email", "publish"],
+                    GrantedAt = now,
+                    ExpiresAt = expiry
+                },
+                new AuthorityClaim
+                {
+                    GrantedBy = "cos-agent",
+                    GrantedTo = "worker-1",
+                    Tier = AuthorityTier.JustDoIt,
+                    GrantedAt = now
+                }
+            ]
+        };
+
+        var (body, messageType) = MessageSerializer.Serialize(original);
+        var deserialized = MessageSerializer.Deserialize(body, messageType);
+
+        Assert.NotNull(deserialized);
+        Assert.Equal(2, deserialized.AuthorityClaims.Count);
+
+        var first = deserialized.AuthorityClaims[0];
+        Assert.Equal("owner", first.GrantedBy);
+        Assert.Equal("cos-agent", first.GrantedTo);
+        Assert.Equal(AuthorityTier.AskMeFirst, first.Tier);
+        Assert.Equal(["send-email", "publish"], first.PermittedActions);
+        Assert.Equal(expiry, first.ExpiresAt);
+
+        var second = deserialized.AuthorityClaims[1];
+        Assert.Equal("cos-agent", second.GrantedBy);
+        Assert.Equal("worker-1", second.GrantedTo);
+        Assert.Equal(AuthorityTier.JustDoIt, second.Tier);
+        Assert.Null(second.ExpiresAt);
     }
 }

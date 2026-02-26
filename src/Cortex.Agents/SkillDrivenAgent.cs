@@ -4,6 +4,7 @@ using Cortex.Agents.Delegation;
 using Cortex.Agents.Personas;
 using Cortex.Agents.Pipeline;
 using Cortex.Core.Authority;
+using Cortex.Core.Context;
 using Cortex.Core.Messages;
 using Cortex.Core.References;
 using Cortex.Messaging;
@@ -25,6 +26,7 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
     private readonly IReferenceCodeGenerator _referenceCodeGenerator;
     private readonly IMessagePublisher _messagePublisher;
     private readonly ILogger<SkillDrivenAgent> _logger;
+    private readonly IContextProvider? _contextProvider;
 
     /// <summary>
     /// Creates a new <see cref="SkillDrivenAgent"/> with the given persona and dependencies.
@@ -36,7 +38,8 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
         IDelegationTracker delegationTracker,
         IReferenceCodeGenerator referenceCodeGenerator,
         IMessagePublisher messagePublisher,
-        ILogger<SkillDrivenAgent> logger)
+        ILogger<SkillDrivenAgent> logger,
+        IContextProvider? contextProvider = null)
     {
         ArgumentNullException.ThrowIfNull(persona);
         ArgumentNullException.ThrowIfNull(pipelineRunner);
@@ -53,6 +56,7 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
         _referenceCodeGenerator = referenceCodeGenerator;
         _messagePublisher = messagePublisher;
         _logger = logger;
+        _contextProvider = contextProvider;
     }
 
     /// <inheritdoc />
@@ -85,6 +89,20 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
             ["messageContent"] = messageContent,
             ["availableCapabilities"] = string.Join(", ", capabilityNames)
         };
+
+        if (_contextProvider is not null)
+        {
+            var contextResults = await _contextProvider.QueryAsync(
+                new ContextQuery { Keywords = messageContent, MaxResults = 5 },
+                cancellationToken);
+
+            if (contextResults.Count > 0)
+            {
+                var contextSummary = string.Join("\n",
+                    contextResults.Select(c => $"[{c.Category}] {c.Content}"));
+                parameters["businessContext"] = contextSummary;
+            }
+        }
 
         // Run the skill pipeline
         var context = await _pipelineRunner.RunAsync(
