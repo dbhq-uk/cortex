@@ -448,6 +448,214 @@ public sealed class SkillDrivenAgentDecompositionTests : IAsyncDisposable
         Assert.NotNull(msg);
     }
 
+    // --- Aggregation path ---
+
+    [Fact]
+    public async Task ProcessAsync_SubtaskReply_StoresResultAndWaits()
+    {
+        // Set up a workflow with 2 subtasks manually
+        var parentRef = ReferenceCode.Create(DateTimeOffset.UtcNow, 50);
+        var childRef1 = ReferenceCode.Create(DateTimeOffset.UtcNow, 51);
+        var childRef2 = ReferenceCode.Create(DateTimeOffset.UtcNow, 52);
+
+        var originalEnvelope = CreateEnvelope("Original goal", replyTo: "agent.requester");
+        await _workflowTracker.CreateAsync(new WorkflowRecord
+        {
+            ReferenceCode = parentRef,
+            OriginalEnvelope = originalEnvelope,
+            SubtaskReferenceCodes = [childRef1, childRef2],
+            Summary = "Test workflow"
+        });
+
+        // Simulate first sub-task reply arriving
+        RegisterDecomposeSkill();
+        var reply1 = new MessageEnvelope
+        {
+            Message = new TestMessage { Content = "Metrics gathered" },
+            ReferenceCode = childRef1,
+            Context = new MessageContext { FromAgentId = "analyst" }
+        };
+
+        var agent = CreateAgent();
+        var result = await agent.ProcessAsync(reply1);
+
+        // Should return null (waiting for child2)
+        Assert.Null(result);
+
+        // Result should be stored
+        Assert.False(await _workflowTracker.AllSubtasksCompleteAsync(parentRef));
+    }
+
+    [Fact]
+    public async Task ProcessAsync_AllSubtasksComplete_AssemblesAndPublishes()
+    {
+        // Set up a workflow with 2 subtasks
+        var parentRef = ReferenceCode.Create(DateTimeOffset.UtcNow, 60);
+        var childRef1 = ReferenceCode.Create(DateTimeOffset.UtcNow, 61);
+        var childRef2 = ReferenceCode.Create(DateTimeOffset.UtcNow, 62);
+
+        var originalEnvelope = CreateEnvelope("Original goal", replyTo: "agent.requester");
+        await _workflowTracker.CreateAsync(new WorkflowRecord
+        {
+            ReferenceCode = parentRef,
+            OriginalEnvelope = originalEnvelope,
+            SubtaskReferenceCodes = [childRef1, childRef2],
+            Summary = "Quarterly report"
+        });
+
+        // Store first result directly
+        await _workflowTracker.StoreSubtaskResultAsync(childRef1, new MessageEnvelope
+        {
+            Message = new TestMessage { Content = "Metrics gathered" },
+            ReferenceCode = childRef1,
+            Context = new MessageContext { FromAgentId = "analyst" }
+        });
+
+        // Set up consumer for final assembled result
+        var assembledResult = new TaskCompletionSource<MessageEnvelope>();
+        await _bus.StartConsumingAsync("agent.requester", e =>
+        {
+            assembledResult.SetResult(e);
+            return Task.CompletedTask;
+        });
+
+        // Simulate second sub-task reply — this should trigger assembly
+        RegisterDecomposeSkill();
+        var reply2 = new MessageEnvelope
+        {
+            Message = new TestMessage { Content = "Narrative written" },
+            ReferenceCode = childRef2,
+            Context = new MessageContext { FromAgentId = "writer" }
+        };
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(reply2);
+
+        var assembled = await assembledResult.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotNull(assembled);
+        Assert.Equal(parentRef, assembled.ReferenceCode);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_AllSubtasksComplete_AssembledResultContainsAllContent()
+    {
+        var parentRef = ReferenceCode.Create(DateTimeOffset.UtcNow, 70);
+        var childRef1 = ReferenceCode.Create(DateTimeOffset.UtcNow, 71);
+        var childRef2 = ReferenceCode.Create(DateTimeOffset.UtcNow, 72);
+
+        var originalEnvelope = CreateEnvelope("Original goal", replyTo: "agent.requester");
+        await _workflowTracker.CreateAsync(new WorkflowRecord
+        {
+            ReferenceCode = parentRef,
+            OriginalEnvelope = originalEnvelope,
+            SubtaskReferenceCodes = [childRef1, childRef2],
+            Summary = "Quarterly report"
+        });
+
+        await _workflowTracker.StoreSubtaskResultAsync(childRef1, new MessageEnvelope
+        {
+            Message = new TestMessage { Content = "Metrics gathered" },
+            ReferenceCode = childRef1,
+            Context = new MessageContext { FromAgentId = "analyst" }
+        });
+
+        var assembledResult = new TaskCompletionSource<MessageEnvelope>();
+        await _bus.StartConsumingAsync("agent.requester", e =>
+        {
+            assembledResult.SetResult(e);
+            return Task.CompletedTask;
+        });
+
+        RegisterDecomposeSkill();
+        var reply2 = new MessageEnvelope
+        {
+            Message = new TestMessage { Content = "Narrative written" },
+            ReferenceCode = childRef2,
+            Context = new MessageContext { FromAgentId = "writer" }
+        };
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(reply2);
+
+        var assembled = await assembledResult.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // The assembled message should be a TextMessage containing content from both sub-tasks
+        // It uses JSON serialization of the original messages
+        var textMsg = Assert.IsType<TextMessage>(assembled.Message);
+        Assert.Contains("Metrics gathered", textMsg.Content);
+        Assert.Contains("Narrative written", textMsg.Content);
+        Assert.Contains("Quarterly report", textMsg.Content);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_AllSubtasksComplete_WorkflowMarkedCompleted()
+    {
+        var parentRef = ReferenceCode.Create(DateTimeOffset.UtcNow, 80);
+        var childRef1 = ReferenceCode.Create(DateTimeOffset.UtcNow, 81);
+
+        var originalEnvelope = CreateEnvelope("Goal", replyTo: "agent.requester");
+        await _workflowTracker.CreateAsync(new WorkflowRecord
+        {
+            ReferenceCode = parentRef,
+            OriginalEnvelope = originalEnvelope,
+            SubtaskReferenceCodes = [childRef1],
+            Summary = "Single-subtask workflow"
+        });
+
+        await _bus.StartConsumingAsync("agent.requester", _ => Task.CompletedTask);
+
+        RegisterDecomposeSkill();
+        var reply = new MessageEnvelope
+        {
+            Message = new TestMessage { Content = "Done" },
+            ReferenceCode = childRef1,
+            Context = new MessageContext { FromAgentId = "worker" }
+        };
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(reply);
+
+        var workflow = await _workflowTracker.GetAsync(parentRef);
+        Assert.NotNull(workflow);
+        Assert.Equal(WorkflowStatus.Completed, workflow.Status);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_SubtaskReply_SkipsPipeline()
+    {
+        // Verify that when a sub-task reply arrives, the decompose pipeline is NOT run
+        var parentRef = ReferenceCode.Create(DateTimeOffset.UtcNow, 90);
+        var childRef1 = ReferenceCode.Create(DateTimeOffset.UtcNow, 91);
+        var childRef2 = ReferenceCode.Create(DateTimeOffset.UtcNow, 92);
+
+        await _workflowTracker.CreateAsync(new WorkflowRecord
+        {
+            ReferenceCode = parentRef,
+            OriginalEnvelope = CreateEnvelope("Goal", replyTo: "agent.requester"),
+            SubtaskReferenceCodes = [childRef1, childRef2],
+            Summary = "Test"
+        });
+
+        // Do NOT register the decompose skill — if the pipeline runs, it will error or produce no result
+        // (We're testing that the pipeline is skipped entirely for sub-task replies)
+
+        var reply = new MessageEnvelope
+        {
+            Message = new TestMessage { Content = "Result" },
+            ReferenceCode = childRef1,
+            Context = new MessageContext { FromAgentId = "worker" }
+        };
+
+        var agent = CreateAgent();
+        var result = await agent.ProcessAsync(reply);
+
+        // Should succeed without running pipeline
+        Assert.Null(result);
+
+        // The fake executor should have zero calls (pipeline was skipped)
+        Assert.Empty(_fakeExecutor.Calls);
+    }
+
     public async ValueTask DisposeAsync()
     {
         _refCodeGenerator.Dispose();

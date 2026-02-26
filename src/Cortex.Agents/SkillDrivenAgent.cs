@@ -85,6 +85,13 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
             "Agent {AgentId} processing message {MessageId}",
             AgentId, envelope.Message.MessageId);
 
+        // Check if this is a sub-task reply for a pending workflow
+        var workflow = await _workflowTracker.FindBySubtaskAsync(envelope.ReferenceCode, cancellationToken);
+        if (workflow is not null)
+        {
+            return await HandleSubtaskReplyAsync(envelope, workflow, cancellationToken);
+        }
+
         // Build parameters for the pipeline
         var capabilityNames = await GetAvailableCapabilitiesAsync(cancellationToken);
         var messageContent = JsonSerializer.Serialize(
@@ -135,6 +142,98 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
         }
 
         return await RouteWorkflowAsync(envelope, decomposition, cancellationToken);
+    }
+
+    private async Task<MessageEnvelope?> HandleSubtaskReplyAsync(
+        MessageEnvelope subtaskReply,
+        WorkflowRecord workflow,
+        CancellationToken cancellationToken)
+    {
+        _logger.LogInformation(
+            "Workflow {ParentRef}: received sub-task result {ChildRef}",
+            workflow.ReferenceCode, subtaskReply.ReferenceCode);
+
+        // Store the result
+        await _workflowTracker.StoreSubtaskResultAsync(
+            subtaskReply.ReferenceCode, subtaskReply, cancellationToken);
+
+        // Update delegation status
+        await _delegationTracker.UpdateStatusAsync(
+            subtaskReply.ReferenceCode, DelegationStatus.Complete, cancellationToken);
+
+        // Check if all sub-tasks are done
+        if (!await _workflowTracker.AllSubtasksCompleteAsync(workflow.ReferenceCode, cancellationToken))
+        {
+            _logger.LogInformation(
+                "Workflow {ParentRef}: waiting for more sub-tasks",
+                workflow.ReferenceCode);
+            return null;
+        }
+
+        // All complete — assemble result
+        var results = await _workflowTracker.GetCompletedResultsAsync(
+            workflow.ReferenceCode, cancellationToken);
+
+        var assembledContent = AssembleResults(workflow, results);
+
+        var assembledEnvelope = new MessageEnvelope
+        {
+            Message = new TextMessage(assembledContent),
+            ReferenceCode = workflow.ReferenceCode,
+            Context = new MessageContext
+            {
+                ParentMessageId = workflow.OriginalEnvelope.Message.MessageId,
+                FromAgentId = AgentId,
+                ReplyTo = workflow.OriginalEnvelope.Context.ReplyTo
+            }
+        };
+
+        // Publish to original requester
+        if (workflow.OriginalEnvelope.Context.ReplyTo is not null)
+        {
+            await _messagePublisher.PublishAsync(
+                assembledEnvelope,
+                workflow.OriginalEnvelope.Context.ReplyTo,
+                cancellationToken);
+        }
+
+        // Mark workflow as completed
+        await _workflowTracker.UpdateStatusAsync(
+            workflow.ReferenceCode, WorkflowStatus.Completed, cancellationToken);
+
+        _logger.LogInformation(
+            "Workflow {ParentRef}: completed, assembled result published to {ReplyTo}",
+            workflow.ReferenceCode, workflow.OriginalEnvelope.Context.ReplyTo);
+
+        return null;
+    }
+
+    private static string AssembleResults(
+        WorkflowRecord workflow,
+        IReadOnlyDictionary<ReferenceCode, MessageEnvelope> results)
+    {
+        var builder = new System.Text.StringBuilder();
+        builder.AppendLine($"# {workflow.Summary}");
+        builder.AppendLine();
+
+        foreach (var subtaskRef in workflow.SubtaskReferenceCodes)
+        {
+            if (results.TryGetValue(subtaskRef, out var result))
+            {
+                var content = ExtractMessageContent(result.Message);
+                builder.AppendLine($"## {subtaskRef}");
+                builder.AppendLine(content);
+                builder.AppendLine();
+            }
+        }
+
+        return builder.ToString().TrimEnd();
+    }
+
+    private static string ExtractMessageContent(IMessage message)
+    {
+        // Use JSON serialization to extract content from any message type
+        return JsonSerializer.Serialize(message, message.GetType());
     }
 
     private async Task<MessageEnvelope?> RouteSingleTaskAsync(
