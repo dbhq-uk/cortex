@@ -3,10 +3,12 @@ using System.Text.Json;
 using Cortex.Agents.Delegation;
 using Cortex.Agents.Personas;
 using Cortex.Agents.Pipeline;
+using Cortex.Agents.Workflows;
 using Cortex.Core.Authority;
 using Cortex.Core.Context;
 using Cortex.Core.Messages;
 using Cortex.Core.References;
+using Cortex.Core.Workflows;
 using Cortex.Messaging;
 using Microsoft.Extensions.Logging;
 
@@ -27,6 +29,7 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
     private readonly IMessagePublisher _messagePublisher;
     private readonly ILogger<SkillDrivenAgent> _logger;
     private readonly IContextProvider? _contextProvider;
+    private readonly IWorkflowTracker _workflowTracker;
 
     /// <summary>
     /// Creates a new <see cref="SkillDrivenAgent"/> with the given persona and dependencies.
@@ -39,7 +42,8 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
         IReferenceCodeGenerator referenceCodeGenerator,
         IMessagePublisher messagePublisher,
         ILogger<SkillDrivenAgent> logger,
-        IContextProvider? contextProvider = null)
+        IContextProvider? contextProvider = null,
+        IWorkflowTracker? workflowTracker = null)
     {
         ArgumentNullException.ThrowIfNull(persona);
         ArgumentNullException.ThrowIfNull(pipelineRunner);
@@ -57,6 +61,7 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
         _messagePublisher = messagePublisher;
         _logger = logger;
         _contextProvider = contextProvider;
+        _workflowTracker = workflowTracker ?? new NullWorkflowTracker();
     }
 
     /// <inheritdoc />
@@ -79,6 +84,13 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
         _logger.LogInformation(
             "Agent {AgentId} processing message {MessageId}",
             AgentId, envelope.Message.MessageId);
+
+        // Check if this is a sub-task reply for a pending workflow
+        var workflow = await _workflowTracker.FindBySubtaskAsync(envelope.ReferenceCode, cancellationToken);
+        if (workflow is not null)
+        {
+            return await HandleSubtaskReplyAsync(envelope, workflow, cancellationToken);
+        }
 
         // Build parameters for the pipeline
         var capabilityNames = await GetAvailableCapabilitiesAsync(cancellationToken);
@@ -108,50 +120,156 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
         var context = await _pipelineRunner.RunAsync(
             _persona.Pipeline, envelope, parameters, cancellationToken);
 
-        // Extract triage result from pipeline output
-        var triageResult = ExtractTriageResult(context);
+        // Extract decomposition result from pipeline output
+        var decomposition = ExtractDecompositionResult(context);
 
-        if (triageResult is null || triageResult.Confidence < _persona.ConfidenceThreshold)
+        if (decomposition is null || decomposition.Confidence < _persona.ConfidenceThreshold)
         {
-            var reason = triageResult is null ? "No triage result" : "Low confidence";
+            var reason = decomposition is null ? "No triage result" : "Low confidence";
             await EscalateAsync(envelope, reason, cancellationToken);
             return null;
         }
 
-        // Find a matching agent (excluding self)
-        var candidates = await _agentRegistry.FindByCapabilityAsync(
-            triageResult.Capability, cancellationToken);
+        if (decomposition.Tasks.Count == 0)
+        {
+            await EscalateAsync(envelope, "No tasks in decomposition", cancellationToken);
+            return null;
+        }
+
+        if (decomposition.Tasks.Count == 1)
+        {
+            return await RouteSingleTaskAsync(envelope, decomposition.Tasks[0], cancellationToken);
+        }
+
+        return await RouteWorkflowAsync(envelope, decomposition, cancellationToken);
+    }
+
+    private async Task<MessageEnvelope?> HandleSubtaskReplyAsync(
+        MessageEnvelope subtaskReply,
+        WorkflowRecord workflow,
+        CancellationToken cancellationToken)
+    {
+        _logger.LogInformation(
+            "Workflow {ParentRef}: received sub-task result {ChildRef}",
+            workflow.ReferenceCode, subtaskReply.ReferenceCode);
+
+        // Store the result
+        await _workflowTracker.StoreSubtaskResultAsync(
+            subtaskReply.ReferenceCode, subtaskReply, cancellationToken);
+
+        // Update delegation status
+        await _delegationTracker.UpdateStatusAsync(
+            subtaskReply.ReferenceCode, DelegationStatus.Complete, cancellationToken);
+
+        // Check if all sub-tasks are done
+        if (!await _workflowTracker.AllSubtasksCompleteAsync(workflow.ReferenceCode, cancellationToken))
+        {
+            _logger.LogInformation(
+                "Workflow {ParentRef}: waiting for more sub-tasks",
+                workflow.ReferenceCode);
+            return null;
+        }
+
+        // All complete — assemble result
+        var results = await _workflowTracker.GetCompletedResultsAsync(
+            workflow.ReferenceCode, cancellationToken);
+
+        var assembledContent = AssembleResults(workflow, results);
+
+        var assembledEnvelope = new MessageEnvelope
+        {
+            Message = new TextMessage(assembledContent),
+            ReferenceCode = workflow.ReferenceCode,
+            Context = new MessageContext
+            {
+                ParentMessageId = workflow.OriginalEnvelope.Message.MessageId,
+                FromAgentId = AgentId,
+                ReplyTo = workflow.OriginalEnvelope.Context.ReplyTo
+            }
+        };
+
+        // Publish to original requester
+        if (workflow.OriginalEnvelope.Context.ReplyTo is not null)
+        {
+            await _messagePublisher.PublishAsync(
+                assembledEnvelope,
+                workflow.OriginalEnvelope.Context.ReplyTo,
+                cancellationToken);
+        }
+
+        // Mark workflow as completed
+        await _workflowTracker.UpdateStatusAsync(
+            workflow.ReferenceCode, WorkflowStatus.Completed, cancellationToken);
+
+        _logger.LogInformation(
+            "Workflow {ParentRef}: completed, assembled result published to {ReplyTo}",
+            workflow.ReferenceCode, workflow.OriginalEnvelope.Context.ReplyTo);
+
+        return null;
+    }
+
+    private static string AssembleResults(
+        WorkflowRecord workflow,
+        IReadOnlyDictionary<ReferenceCode, MessageEnvelope> results)
+    {
+        var builder = new System.Text.StringBuilder();
+        builder.AppendLine($"# {workflow.Summary}");
+        builder.AppendLine();
+
+        foreach (var subtaskRef in workflow.SubtaskReferenceCodes)
+        {
+            if (results.TryGetValue(subtaskRef, out var result))
+            {
+                var content = ExtractMessageContent(result.Message);
+                builder.AppendLine($"## {subtaskRef}");
+                builder.AppendLine(content);
+                builder.AppendLine();
+            }
+        }
+
+        return builder.ToString().TrimEnd();
+    }
+
+    private static string ExtractMessageContent(IMessage message)
+    {
+        // Use JSON serialization to extract content from any message type
+        return JsonSerializer.Serialize(message, message.GetType());
+    }
+
+    private async Task<MessageEnvelope?> RouteSingleTaskAsync(
+        MessageEnvelope envelope,
+        DecompositionTask task,
+        CancellationToken cancellationToken)
+    {
+        if (!Enum.TryParse<AuthorityTier>(task.AuthorityTier, ignoreCase: true, out var taskAuthority))
+        {
+            taskAuthority = AuthorityTier.JustDoIt;
+        }
+
+        var candidates = await _agentRegistry.FindByCapabilityAsync(task.Capability, cancellationToken);
         var filtered = candidates.Where(a => a.AgentId != AgentId).ToList();
 
         if (filtered.Count == 0)
         {
-            await EscalateAsync(
-                envelope,
-                $"No agent with capability '{triageResult.Capability}'",
-                cancellationToken);
+            await EscalateAsync(envelope, $"No agent with capability '{task.Capability}'", cancellationToken);
             return null;
         }
 
         var target = filtered[0];
-
-        // Authority narrowing: outbound never exceeds inbound
         var maxInbound = GetMaxAuthorityTier(envelope);
-        var effectiveTier = (AuthorityTier)Math.Min(
-            (int)triageResult.AuthorityTier, (int)maxInbound);
+        var effectiveTier = (AuthorityTier)Math.Min((int)taskAuthority, (int)maxInbound);
 
-        // Track delegation
         var refCode = await _referenceCodeGenerator.GenerateAsync(cancellationToken);
         await _delegationTracker.DelegateAsync(new DelegationRecord
         {
             ReferenceCode = refCode,
             DelegatedBy = AgentId,
             DelegatedTo = target.AgentId,
-            Description = triageResult.Summary,
+            Description = task.Description,
             Status = DelegationStatus.Assigned,
             AssignedAt = DateTimeOffset.UtcNow
         }, cancellationToken);
 
-        // Build and publish the routed envelope
         var routedEnvelope = envelope with
         {
             ReferenceCode = refCode,
@@ -172,12 +290,108 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
             }
         };
 
-        await _messagePublisher.PublishAsync(
-            routedEnvelope, $"agent.{target.AgentId}", cancellationToken);
+        await _messagePublisher.PublishAsync(routedEnvelope, $"agent.{target.AgentId}", cancellationToken);
 
         _logger.LogInformation(
             "Routed {RefCode} to {TargetAgent} (capability: {Capability}, authority: {Authority})",
-            refCode, target.AgentId, triageResult.Capability, effectiveTier);
+            refCode, target.AgentId, task.Capability, effectiveTier);
+
+        return null;
+    }
+
+    private async Task<MessageEnvelope?> RouteWorkflowAsync(
+        MessageEnvelope envelope,
+        DecompositionResult decomposition,
+        CancellationToken cancellationToken)
+    {
+        var maxInbound = GetMaxAuthorityTier(envelope);
+        var parentRefCode = await _referenceCodeGenerator.GenerateAsync(cancellationToken);
+        var subtaskRefCodes = new List<ReferenceCode>();
+
+        // Pre-validate: ensure all capabilities have agents before creating any delegations
+        foreach (var task in decomposition.Tasks)
+        {
+            var candidates = await _agentRegistry.FindByCapabilityAsync(task.Capability, cancellationToken);
+            var filtered = candidates.Where(a => a.AgentId != AgentId).ToList();
+
+            if (filtered.Count == 0)
+            {
+                await EscalateAsync(
+                    envelope,
+                    $"Cannot decompose: no agent with capability '{task.Capability}'",
+                    cancellationToken);
+                return null;
+            }
+        }
+
+        // All capabilities valid — create delegations and publish
+        foreach (var task in decomposition.Tasks)
+        {
+            if (!Enum.TryParse<AuthorityTier>(task.AuthorityTier, ignoreCase: true, out var taskAuthority))
+            {
+                taskAuthority = AuthorityTier.JustDoIt;
+            }
+
+            var effectiveTier = (AuthorityTier)Math.Min((int)taskAuthority, (int)maxInbound);
+
+            var candidates = await _agentRegistry.FindByCapabilityAsync(task.Capability, cancellationToken);
+            var target = candidates.First(a => a.AgentId != AgentId);
+
+            var childRefCode = await _referenceCodeGenerator.GenerateAsync(cancellationToken);
+            subtaskRefCodes.Add(childRefCode);
+
+            await _delegationTracker.DelegateAsync(new DelegationRecord
+            {
+                ReferenceCode = childRefCode,
+                DelegatedBy = AgentId,
+                DelegatedTo = target.AgentId,
+                Description = task.Description,
+                Status = DelegationStatus.Assigned,
+                AssignedAt = DateTimeOffset.UtcNow
+            }, cancellationToken);
+
+            var childEnvelope = envelope with
+            {
+                ReferenceCode = childRefCode,
+                AuthorityClaims =
+                [
+                    new AuthorityClaim
+                    {
+                        GrantedBy = AgentId,
+                        GrantedTo = target.AgentId,
+                        Tier = effectiveTier,
+                        GrantedAt = DateTimeOffset.UtcNow
+                    }
+                ],
+                Context = envelope.Context with
+                {
+                    ParentMessageId = envelope.Message.MessageId,
+                    FromAgentId = AgentId,
+                    ReplyTo = $"agent.{AgentId}",
+                    OriginalGoal = decomposition.Summary
+                }
+            };
+
+            await _messagePublisher.PublishAsync(childEnvelope, $"agent.{target.AgentId}", cancellationToken);
+
+            _logger.LogInformation(
+                "Workflow {ParentRef}: dispatched {ChildRef} to {Target} (capability: {Capability})",
+                parentRefCode, childRefCode, target.AgentId, task.Capability);
+        }
+
+        // Create workflow record
+        var workflow = new WorkflowRecord
+        {
+            ReferenceCode = parentRefCode,
+            OriginalEnvelope = envelope,
+            SubtaskReferenceCodes = subtaskRefCodes,
+            Summary = decomposition.Summary
+        };
+        await _workflowTracker.CreateAsync(workflow, cancellationToken);
+
+        _logger.LogInformation(
+            "Created workflow {ParentRef} with {Count} sub-tasks",
+            parentRefCode, subtaskRefCodes.Count);
 
         return null;
     }
@@ -244,7 +458,7 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
             .ToList();
     }
 
-    private static TriageResult? ExtractTriageResult(SkillPipelineContext context)
+    private static DecompositionResult? ExtractDecompositionResult(SkillPipelineContext context)
     {
         foreach (var result in context.Results.Values)
         {
@@ -255,25 +469,43 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
 
             try
             {
-                var capability = json.GetProperty("capability").GetString();
-                var authorityStr = json.GetProperty("authorityTier").GetString();
+                if (!json.TryGetProperty("tasks", out var tasksElement)
+                    || tasksElement.ValueKind != JsonValueKind.Array)
+                {
+                    return ExtractFromLegacyTriageFormat(json);
+                }
+
+                var tasks = new List<DecompositionTask>();
+                foreach (var taskElement in tasksElement.EnumerateArray())
+                {
+                    var capability = taskElement.GetProperty("capability").GetString();
+                    var description = taskElement.GetProperty("description").GetString();
+                    var authorityTier = taskElement.GetProperty("authorityTier").GetString();
+
+                    if (capability is null || description is null || authorityTier is null)
+                    {
+                        continue;
+                    }
+
+                    tasks.Add(new DecompositionTask
+                    {
+                        Capability = capability,
+                        Description = description,
+                        AuthorityTier = authorityTier
+                    });
+                }
+
                 var summary = json.GetProperty("summary").GetString();
                 var confidence = json.GetProperty("confidence").GetDouble();
 
-                if (capability is null || authorityStr is null || summary is null)
+                if (tasks.Count == 0 || summary is null)
                 {
                     continue;
                 }
 
-                if (!Enum.TryParse<AuthorityTier>(authorityStr, ignoreCase: true, out var authorityTier))
+                return new DecompositionResult
                 {
-                    continue;
-                }
-
-                return new TriageResult
-                {
-                    Capability = capability,
-                    AuthorityTier = authorityTier,
+                    Tasks = tasks,
                     Summary = summary,
                     Confidence = confidence
                 };
@@ -285,6 +517,41 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
         }
 
         return null;
+    }
+
+    private static DecompositionResult? ExtractFromLegacyTriageFormat(JsonElement json)
+    {
+        try
+        {
+            var capability = json.GetProperty("capability").GetString();
+            var authorityStr = json.GetProperty("authorityTier").GetString();
+            var summary = json.GetProperty("summary").GetString();
+            var confidence = json.GetProperty("confidence").GetDouble();
+
+            if (capability is null || authorityStr is null || summary is null)
+            {
+                return null;
+            }
+
+            return new DecompositionResult
+            {
+                Tasks =
+                [
+                    new DecompositionTask
+                    {
+                        Capability = capability,
+                        Description = summary,
+                        AuthorityTier = authorityStr
+                    }
+                ],
+                Summary = summary,
+                Confidence = confidence
+            };
+        }
+        catch (Exception ex) when (ex is KeyNotFoundException or InvalidOperationException)
+        {
+            return null;
+        }
     }
 
     private static AuthorityTier GetMaxAuthorityTier(MessageEnvelope envelope)

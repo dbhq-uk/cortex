@@ -1,0 +1,664 @@
+// tests/Cortex.Agents.Tests/SkillDrivenAgentDecompositionTests.cs
+using System.Text.Json;
+using Cortex.Agents.Delegation;
+using Cortex.Agents.Personas;
+using Cortex.Agents.Pipeline;
+using Cortex.Agents.Tests.Pipeline;
+using Cortex.Agents.Workflows;
+using Cortex.Core.Authority;
+using Cortex.Core.Messages;
+using Cortex.Core.References;
+using Cortex.Core.Workflows;
+using Cortex.Messaging;
+using Cortex.Skills;
+using Microsoft.Extensions.Logging.Abstractions;
+
+namespace Cortex.Agents.Tests;
+
+/// <summary>
+/// Tests for <see cref="SkillDrivenAgent"/> decomposition result parsing
+/// and single-task routing with backward compatibility.
+/// </summary>
+public sealed class SkillDrivenAgentDecompositionTests : IAsyncDisposable
+{
+    private readonly InMemoryMessageBus _bus = new();
+    private readonly InMemoryAgentRegistry _agentRegistry = new();
+    private readonly InMemoryDelegationTracker _delegationTracker = new();
+    private readonly InMemorySkillRegistry _skillRegistry = new();
+    private readonly FakeSkillExecutor _fakeExecutor = new("llm");
+    private readonly InMemoryWorkflowTracker _workflowTracker = new();
+    private readonly SequentialReferenceCodeGenerator _refCodeGenerator;
+
+    public SkillDrivenAgentDecompositionTests()
+    {
+        _refCodeGenerator = new SequentialReferenceCodeGenerator(
+            new InMemorySequenceStore(), TimeProvider.System);
+    }
+
+    private SkillDrivenAgent CreateAgent(PersonaDefinition? persona = null)
+    {
+        var p = persona ?? CreateDefaultPersona();
+        var pipelineRunner = new SkillPipelineRunner(
+            _skillRegistry,
+            [_fakeExecutor],
+            NullLogger<SkillPipelineRunner>.Instance);
+
+        return new SkillDrivenAgent(
+            p,
+            pipelineRunner,
+            _agentRegistry,
+            _delegationTracker,
+            _refCodeGenerator,
+            _bus,
+            NullLogger<SkillDrivenAgent>.Instance,
+            contextProvider: null,
+            workflowTracker: _workflowTracker);
+    }
+
+    private static PersonaDefinition CreateDefaultPersona() => new()
+    {
+        AgentId = "cos",
+        Name = "Chief of Staff",
+        AgentType = "ai",
+        Capabilities =
+        [
+            new AgentCapability { Name = "triage", Description = "Triage" }
+        ],
+        Pipeline = ["cos-decompose"],
+        EscalationTarget = "agent.founder",
+        ConfidenceThreshold = 0.6
+    };
+
+    private static MessageEnvelope CreateEnvelope(
+        string content = "test",
+        string? replyTo = null,
+        IReadOnlyList<AuthorityClaim>? claims = null) =>
+        new()
+        {
+            Message = new TestMessage { Content = content },
+            ReferenceCode = ReferenceCode.Create(DateTimeOffset.UtcNow, 1),
+            Context = new MessageContext { ReplyTo = replyTo },
+            AuthorityClaims = claims ?? []
+        };
+
+    private void RegisterDecomposeSkill()
+    {
+        _skillRegistry.RegisterAsync(new SkillDefinition
+        {
+            SkillId = "cos-decompose",
+            Name = "CoS Decompose",
+            Description = "Decompose",
+            Category = SkillCategory.Agent,
+            ExecutorType = "llm"
+        }).GetAwaiter().GetResult();
+    }
+
+    private void SetDecomposeResult(object result)
+    {
+        var json = JsonSerializer.SerializeToElement(result);
+        _fakeExecutor.SetResult("cos-decompose", json);
+    }
+
+    private async Task RegisterSpecialistAgent(string agentId, string capabilityName)
+    {
+        await _agentRegistry.RegisterAsync(new AgentRegistration
+        {
+            AgentId = agentId,
+            Name = $"Agent {agentId}",
+            AgentType = "ai",
+            Capabilities =
+            [
+                new AgentCapability { Name = capabilityName, Description = capabilityName }
+            ],
+            RegisteredAt = DateTimeOffset.UtcNow,
+            IsAvailable = true
+        });
+    }
+
+    // --- Single-task routing ---
+
+    [Fact]
+    public async Task ProcessAsync_SingleTask_RoutesToMatchingAgent()
+    {
+        RegisterDecomposeSkill();
+        SetDecomposeResult(new
+        {
+            tasks = new[] { new { capability = "email-drafting", description = "Draft reply", authorityTier = "DoItAndShowMe" } },
+            summary = "Draft email reply",
+            confidence = 0.9
+        });
+        await RegisterSpecialistAgent("email-agent", "email-drafting");
+
+        var routed = new TaskCompletionSource<MessageEnvelope>();
+        await _bus.StartConsumingAsync("agent.email-agent", e =>
+        {
+            routed.SetResult(e);
+            return Task.CompletedTask;
+        });
+
+        var agent = CreateAgent();
+        var result = await agent.ProcessAsync(CreateEnvelope("Draft reply to John"));
+
+        Assert.Null(result);
+
+        var routedMsg = await routed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotNull(routedMsg);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_SingleTask_CreatesDelegationRecord()
+    {
+        RegisterDecomposeSkill();
+        SetDecomposeResult(new
+        {
+            tasks = new[] { new { capability = "email-drafting", description = "Draft reply", authorityTier = "DoItAndShowMe" } },
+            summary = "Draft email reply",
+            confidence = 0.9
+        });
+        await RegisterSpecialistAgent("email-agent", "email-drafting");
+
+        var routed = new TaskCompletionSource<MessageEnvelope>();
+        await _bus.StartConsumingAsync("agent.email-agent", e =>
+        {
+            routed.SetResult(e);
+            return Task.CompletedTask;
+        });
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(CreateEnvelope("test"));
+
+        await routed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var delegations = await _delegationTracker.GetByAssigneeAsync("email-agent");
+        Assert.Single(delegations);
+        Assert.Equal("cos", delegations[0].DelegatedBy);
+        Assert.Equal("email-agent", delegations[0].DelegatedTo);
+        Assert.Equal("Draft reply", delegations[0].Description);
+        Assert.Equal(DelegationStatus.Assigned, delegations[0].Status);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_SingleTask_DoesNotCreateWorkflow()
+    {
+        RegisterDecomposeSkill();
+        SetDecomposeResult(new
+        {
+            tasks = new[] { new { capability = "email-drafting", description = "Draft reply", authorityTier = "DoItAndShowMe" } },
+            summary = "Draft email reply",
+            confidence = 0.9
+        });
+        await RegisterSpecialistAgent("email-agent", "email-drafting");
+
+        var routed = new TaskCompletionSource<MessageEnvelope>();
+        await _bus.StartConsumingAsync("agent.email-agent", e =>
+        {
+            routed.SetResult(e);
+            return Task.CompletedTask;
+        });
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(CreateEnvelope("test"));
+
+        var routedMsg = await routed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Single-task routing should not create a workflow record
+        var workflow = await _workflowTracker.GetAsync(routedMsg.ReferenceCode);
+        Assert.Null(workflow);
+    }
+
+    // --- Escalation ---
+
+    [Fact]
+    public async Task ProcessAsync_LowConfidence_Escalates()
+    {
+        RegisterDecomposeSkill();
+        SetDecomposeResult(new
+        {
+            tasks = new[] { new { capability = "email-drafting", description = "Draft reply", authorityTier = "DoItAndShowMe" } },
+            summary = "Draft email reply",
+            confidence = 0.3 // below 0.6 threshold
+        });
+        await RegisterSpecialistAgent("email-agent", "email-drafting");
+
+        var escalated = new TaskCompletionSource<MessageEnvelope>();
+        await _bus.StartConsumingAsync("agent.founder", e =>
+        {
+            escalated.SetResult(e);
+            return Task.CompletedTask;
+        });
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(CreateEnvelope("test"));
+
+        var msg = await escalated.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotNull(msg);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_MalformedResult_Escalates()
+    {
+        RegisterDecomposeSkill();
+        // Set garbage result that cannot be parsed as decomposition
+        var garbage = JsonSerializer.SerializeToElement(new { foo = "bar" });
+        _fakeExecutor.SetResult("cos-decompose", garbage);
+
+        var escalated = new TaskCompletionSource<MessageEnvelope>();
+        await _bus.StartConsumingAsync("agent.founder", e =>
+        {
+            escalated.SetResult(e);
+            return Task.CompletedTask;
+        });
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(CreateEnvelope("test"));
+
+        var msg = await escalated.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotNull(msg);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_EmptyTasks_Escalates()
+    {
+        RegisterDecomposeSkill();
+        SetDecomposeResult(new
+        {
+            tasks = Array.Empty<object>(),
+            summary = "Empty",
+            confidence = 0.9
+        });
+
+        var escalated = new TaskCompletionSource<MessageEnvelope>();
+        await _bus.StartConsumingAsync("agent.founder", e =>
+        {
+            escalated.SetResult(e);
+            return Task.CompletedTask;
+        });
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(CreateEnvelope("test"));
+
+        var msg = await escalated.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotNull(msg);
+    }
+
+    // --- Multi-task decomposition ---
+
+    [Fact]
+    public async Task ProcessAsync_MultiTask_PublishesToMultipleAgents()
+    {
+        RegisterDecomposeSkill();
+        SetDecomposeResult(new
+        {
+            tasks = new[]
+            {
+                new { capability = "data-analysis", description = "Gather metrics", authorityTier = "JustDoIt" },
+                new { capability = "drafting", description = "Write narrative", authorityTier = "DoItAndShowMe" }
+            },
+            summary = "Quarterly report",
+            confidence = 0.9
+        });
+        await RegisterSpecialistAgent("analyst", "data-analysis");
+        await RegisterSpecialistAgent("writer", "drafting");
+
+        var routedToAnalyst = new TaskCompletionSource<MessageEnvelope>();
+        var routedToWriter = new TaskCompletionSource<MessageEnvelope>();
+        await _bus.StartConsumingAsync("agent.analyst", e =>
+        {
+            routedToAnalyst.SetResult(e);
+            return Task.CompletedTask;
+        });
+        await _bus.StartConsumingAsync("agent.writer", e =>
+        {
+            routedToWriter.SetResult(e);
+            return Task.CompletedTask;
+        });
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(CreateEnvelope("Prepare quarterly report"));
+
+        var analystMsg = await routedToAnalyst.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var writerMsg = await routedToWriter.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotNull(analystMsg);
+        Assert.NotNull(writerMsg);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_MultiTask_CreatesWorkflowRecord()
+    {
+        RegisterDecomposeSkill();
+        SetDecomposeResult(new
+        {
+            tasks = new[]
+            {
+                new { capability = "data-analysis", description = "Gather metrics", authorityTier = "JustDoIt" },
+                new { capability = "drafting", description = "Write narrative", authorityTier = "DoItAndShowMe" }
+            },
+            summary = "Quarterly report",
+            confidence = 0.9
+        });
+        await RegisterSpecialistAgent("analyst", "data-analysis");
+        await RegisterSpecialistAgent("writer", "drafting");
+
+        await _bus.StartConsumingAsync("agent.analyst", _ => Task.CompletedTask);
+        await _bus.StartConsumingAsync("agent.writer", _ => Task.CompletedTask);
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(CreateEnvelope("Prepare quarterly report"));
+
+        var analystDelegations = await _delegationTracker.GetByAssigneeAsync("analyst");
+        Assert.Single(analystDelegations);
+        var subtaskRef = analystDelegations[0].ReferenceCode;
+
+        var workflow = await _workflowTracker.FindBySubtaskAsync(subtaskRef);
+        Assert.NotNull(workflow);
+        Assert.Equal("Quarterly report", workflow.Summary);
+        Assert.Equal(2, workflow.SubtaskReferenceCodes.Count);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_MultiTask_CreatesDelegationPerSubtask()
+    {
+        RegisterDecomposeSkill();
+        SetDecomposeResult(new
+        {
+            tasks = new[]
+            {
+                new { capability = "data-analysis", description = "Gather metrics", authorityTier = "JustDoIt" },
+                new { capability = "drafting", description = "Write narrative", authorityTier = "DoItAndShowMe" }
+            },
+            summary = "Quarterly report",
+            confidence = 0.9
+        });
+        await RegisterSpecialistAgent("analyst", "data-analysis");
+        await RegisterSpecialistAgent("writer", "drafting");
+
+        await _bus.StartConsumingAsync("agent.analyst", _ => Task.CompletedTask);
+        await _bus.StartConsumingAsync("agent.writer", _ => Task.CompletedTask);
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(CreateEnvelope("Prepare quarterly report"));
+
+        var analystDelegations = await _delegationTracker.GetByAssigneeAsync("analyst");
+        var writerDelegations = await _delegationTracker.GetByAssigneeAsync("writer");
+        Assert.Single(analystDelegations);
+        Assert.Single(writerDelegations);
+        Assert.Equal("Gather metrics", analystDelegations[0].Description);
+        Assert.Equal("Write narrative", writerDelegations[0].Description);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_MultiTask_SetsReplyToCoS()
+    {
+        RegisterDecomposeSkill();
+        SetDecomposeResult(new
+        {
+            tasks = new[]
+            {
+                new { capability = "data-analysis", description = "Gather metrics", authorityTier = "JustDoIt" },
+                new { capability = "drafting", description = "Write narrative", authorityTier = "DoItAndShowMe" }
+            },
+            summary = "Quarterly report",
+            confidence = 0.9
+        });
+        await RegisterSpecialistAgent("analyst", "data-analysis");
+        await RegisterSpecialistAgent("writer", "drafting");
+
+        var routedToAnalyst = new TaskCompletionSource<MessageEnvelope>();
+        await _bus.StartConsumingAsync("agent.analyst", e =>
+        {
+            routedToAnalyst.SetResult(e);
+            return Task.CompletedTask;
+        });
+        await _bus.StartConsumingAsync("agent.writer", _ => Task.CompletedTask);
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(CreateEnvelope("Prepare quarterly report", replyTo: "agent.requester"));
+
+        var msg = await routedToAnalyst.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("agent.cos", msg.Context.ReplyTo);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_MultiTask_PartialCapabilityFailure_Escalates()
+    {
+        RegisterDecomposeSkill();
+        SetDecomposeResult(new
+        {
+            tasks = new[]
+            {
+                new { capability = "data-analysis", description = "Gather metrics", authorityTier = "JustDoIt" },
+                new { capability = "nonexistent", description = "Unknown task", authorityTier = "JustDoIt" }
+            },
+            summary = "Mixed report",
+            confidence = 0.9
+        });
+        await RegisterSpecialistAgent("analyst", "data-analysis");
+
+        var escalated = new TaskCompletionSource<MessageEnvelope>();
+        await _bus.StartConsumingAsync("agent.founder", e =>
+        {
+            escalated.SetResult(e);
+            return Task.CompletedTask;
+        });
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(CreateEnvelope("Mixed request"));
+
+        var msg = await escalated.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotNull(msg);
+    }
+
+    // --- Aggregation path ---
+
+    [Fact]
+    public async Task ProcessAsync_SubtaskReply_StoresResultAndWaits()
+    {
+        // Set up a workflow with 2 subtasks manually
+        var parentRef = ReferenceCode.Create(DateTimeOffset.UtcNow, 50);
+        var childRef1 = ReferenceCode.Create(DateTimeOffset.UtcNow, 51);
+        var childRef2 = ReferenceCode.Create(DateTimeOffset.UtcNow, 52);
+
+        var originalEnvelope = CreateEnvelope("Original goal", replyTo: "agent.requester");
+        await _workflowTracker.CreateAsync(new WorkflowRecord
+        {
+            ReferenceCode = parentRef,
+            OriginalEnvelope = originalEnvelope,
+            SubtaskReferenceCodes = [childRef1, childRef2],
+            Summary = "Test workflow"
+        });
+
+        // Simulate first sub-task reply arriving
+        RegisterDecomposeSkill();
+        var reply1 = new MessageEnvelope
+        {
+            Message = new TestMessage { Content = "Metrics gathered" },
+            ReferenceCode = childRef1,
+            Context = new MessageContext { FromAgentId = "analyst" }
+        };
+
+        var agent = CreateAgent();
+        var result = await agent.ProcessAsync(reply1);
+
+        // Should return null (waiting for child2)
+        Assert.Null(result);
+
+        // Result should be stored
+        Assert.False(await _workflowTracker.AllSubtasksCompleteAsync(parentRef));
+    }
+
+    [Fact]
+    public async Task ProcessAsync_AllSubtasksComplete_AssemblesAndPublishes()
+    {
+        // Set up a workflow with 2 subtasks
+        var parentRef = ReferenceCode.Create(DateTimeOffset.UtcNow, 60);
+        var childRef1 = ReferenceCode.Create(DateTimeOffset.UtcNow, 61);
+        var childRef2 = ReferenceCode.Create(DateTimeOffset.UtcNow, 62);
+
+        var originalEnvelope = CreateEnvelope("Original goal", replyTo: "agent.requester");
+        await _workflowTracker.CreateAsync(new WorkflowRecord
+        {
+            ReferenceCode = parentRef,
+            OriginalEnvelope = originalEnvelope,
+            SubtaskReferenceCodes = [childRef1, childRef2],
+            Summary = "Quarterly report"
+        });
+
+        // Store first result directly
+        await _workflowTracker.StoreSubtaskResultAsync(childRef1, new MessageEnvelope
+        {
+            Message = new TestMessage { Content = "Metrics gathered" },
+            ReferenceCode = childRef1,
+            Context = new MessageContext { FromAgentId = "analyst" }
+        });
+
+        // Set up consumer for final assembled result
+        var assembledResult = new TaskCompletionSource<MessageEnvelope>();
+        await _bus.StartConsumingAsync("agent.requester", e =>
+        {
+            assembledResult.SetResult(e);
+            return Task.CompletedTask;
+        });
+
+        // Simulate second sub-task reply — this should trigger assembly
+        RegisterDecomposeSkill();
+        var reply2 = new MessageEnvelope
+        {
+            Message = new TestMessage { Content = "Narrative written" },
+            ReferenceCode = childRef2,
+            Context = new MessageContext { FromAgentId = "writer" }
+        };
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(reply2);
+
+        var assembled = await assembledResult.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotNull(assembled);
+        Assert.Equal(parentRef, assembled.ReferenceCode);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_AllSubtasksComplete_AssembledResultContainsAllContent()
+    {
+        var parentRef = ReferenceCode.Create(DateTimeOffset.UtcNow, 70);
+        var childRef1 = ReferenceCode.Create(DateTimeOffset.UtcNow, 71);
+        var childRef2 = ReferenceCode.Create(DateTimeOffset.UtcNow, 72);
+
+        var originalEnvelope = CreateEnvelope("Original goal", replyTo: "agent.requester");
+        await _workflowTracker.CreateAsync(new WorkflowRecord
+        {
+            ReferenceCode = parentRef,
+            OriginalEnvelope = originalEnvelope,
+            SubtaskReferenceCodes = [childRef1, childRef2],
+            Summary = "Quarterly report"
+        });
+
+        await _workflowTracker.StoreSubtaskResultAsync(childRef1, new MessageEnvelope
+        {
+            Message = new TestMessage { Content = "Metrics gathered" },
+            ReferenceCode = childRef1,
+            Context = new MessageContext { FromAgentId = "analyst" }
+        });
+
+        var assembledResult = new TaskCompletionSource<MessageEnvelope>();
+        await _bus.StartConsumingAsync("agent.requester", e =>
+        {
+            assembledResult.SetResult(e);
+            return Task.CompletedTask;
+        });
+
+        RegisterDecomposeSkill();
+        var reply2 = new MessageEnvelope
+        {
+            Message = new TestMessage { Content = "Narrative written" },
+            ReferenceCode = childRef2,
+            Context = new MessageContext { FromAgentId = "writer" }
+        };
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(reply2);
+
+        var assembled = await assembledResult.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // The assembled message should be a TextMessage containing content from both sub-tasks
+        // It uses JSON serialization of the original messages
+        var textMsg = Assert.IsType<TextMessage>(assembled.Message);
+        Assert.Contains("Metrics gathered", textMsg.Content);
+        Assert.Contains("Narrative written", textMsg.Content);
+        Assert.Contains("Quarterly report", textMsg.Content);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_AllSubtasksComplete_WorkflowMarkedCompleted()
+    {
+        var parentRef = ReferenceCode.Create(DateTimeOffset.UtcNow, 80);
+        var childRef1 = ReferenceCode.Create(DateTimeOffset.UtcNow, 81);
+
+        var originalEnvelope = CreateEnvelope("Goal", replyTo: "agent.requester");
+        await _workflowTracker.CreateAsync(new WorkflowRecord
+        {
+            ReferenceCode = parentRef,
+            OriginalEnvelope = originalEnvelope,
+            SubtaskReferenceCodes = [childRef1],
+            Summary = "Single-subtask workflow"
+        });
+
+        await _bus.StartConsumingAsync("agent.requester", _ => Task.CompletedTask);
+
+        RegisterDecomposeSkill();
+        var reply = new MessageEnvelope
+        {
+            Message = new TestMessage { Content = "Done" },
+            ReferenceCode = childRef1,
+            Context = new MessageContext { FromAgentId = "worker" }
+        };
+
+        var agent = CreateAgent();
+        await agent.ProcessAsync(reply);
+
+        var workflow = await _workflowTracker.GetAsync(parentRef);
+        Assert.NotNull(workflow);
+        Assert.Equal(WorkflowStatus.Completed, workflow.Status);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_SubtaskReply_SkipsPipeline()
+    {
+        // Verify that when a sub-task reply arrives, the decompose pipeline is NOT run
+        var parentRef = ReferenceCode.Create(DateTimeOffset.UtcNow, 90);
+        var childRef1 = ReferenceCode.Create(DateTimeOffset.UtcNow, 91);
+        var childRef2 = ReferenceCode.Create(DateTimeOffset.UtcNow, 92);
+
+        await _workflowTracker.CreateAsync(new WorkflowRecord
+        {
+            ReferenceCode = parentRef,
+            OriginalEnvelope = CreateEnvelope("Goal", replyTo: "agent.requester"),
+            SubtaskReferenceCodes = [childRef1, childRef2],
+            Summary = "Test"
+        });
+
+        // Do NOT register the decompose skill — if the pipeline runs, it will error or produce no result
+        // (We're testing that the pipeline is skipped entirely for sub-task replies)
+
+        var reply = new MessageEnvelope
+        {
+            Message = new TestMessage { Content = "Result" },
+            ReferenceCode = childRef1,
+            Context = new MessageContext { FromAgentId = "worker" }
+        };
+
+        var agent = CreateAgent();
+        var result = await agent.ProcessAsync(reply);
+
+        // Should succeed without running pipeline
+        Assert.Null(result);
+
+        // The fake executor should have zero calls (pipeline was skipped)
+        Assert.Empty(_fakeExecutor.Calls);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _refCodeGenerator.Dispose();
+        await _bus.DisposeAsync();
+    }
+}
