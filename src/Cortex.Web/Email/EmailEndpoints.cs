@@ -133,7 +133,9 @@ public static class EmailEndpoints
         ITokenStore tokenStore,
         IEmailProvider emailProvider,
         ISubscriptionStore subscriptionStore,
-        ILogger<EmailWebhookHandler> logger)
+        IHttpClientFactory httpClientFactory,
+        ILogger<EmailWebhookHandler> logger,
+        CancellationToken cancellationToken)
     {
         var code = context.Request.Query["code"].ToString();
         if (string.IsNullOrWhiteSpace(code))
@@ -143,7 +145,7 @@ public static class EmailEndpoints
 
         var o = options.Value;
 
-        using var httpClient = new HttpClient();
+        using var httpClient = httpClientFactory.CreateClient();
         var content = new FormUrlEncodedContent(new Dictionary<string, string>
         {
             ["client_id"] = o.ClientId,
@@ -156,7 +158,8 @@ public static class EmailEndpoints
 
         var response = await httpClient.PostAsync(
             $"https://login.microsoftonline.com/{o.TenantId}/oauth2/v2.0/token",
-            content);
+            content,
+            cancellationToken);
 
         if (!response.IsSuccessStatusCode)
         {
@@ -165,7 +168,7 @@ public static class EmailEndpoints
         }
 
         using var doc = System.Text.Json.JsonDocument.Parse(
-            await response.Content.ReadAsStringAsync());
+            await response.Content.ReadAsStringAsync(cancellationToken));
 
         var tokens = new TokenSet
         {
@@ -175,13 +178,13 @@ public static class EmailEndpoints
                 doc.RootElement.GetProperty("expires_in").GetInt32())
         };
 
-        await tokenStore.StoreAsync("microsoft", "default", tokens);
+        await tokenStore.StoreAsync("microsoft", "default", tokens, cancellationToken);
 
         if (!string.IsNullOrWhiteSpace(o.WebhookNotificationUrl))
         {
             var subscription = await emailProvider.CreateSubscriptionAsync(
-                "default", o.WebhookNotificationUrl);
-            await subscriptionStore.StoreAsync(subscription);
+                "default", o.WebhookNotificationUrl, cancellationToken);
+            await subscriptionStore.StoreAsync(subscription, cancellationToken);
 
             logger.LogInformation(
                 "Email connected: subscription {SubscriptionId} created, expires {ExpiresAt}",
@@ -216,24 +219,25 @@ public static class EmailEndpoints
         ITokenStore tokenStore,
         ISubscriptionStore subscriptionStore,
         IEmailProvider emailProvider,
-        ILogger<EmailWebhookHandler> logger)
+        ILogger<EmailWebhookHandler> logger,
+        CancellationToken cancellationToken)
     {
-        var subscriptions = await subscriptionStore.GetExpiringAsync(TimeSpan.FromDays(365));
+        var subscriptions = await subscriptionStore.GetExpiringAsync(TimeSpan.FromDays(365), cancellationToken);
         foreach (var sub in subscriptions)
         {
             try
             {
-                await emailProvider.DeleteSubscriptionAsync(sub.SubscriptionId);
+                await emailProvider.DeleteSubscriptionAsync(sub.SubscriptionId, cancellationToken);
             }
             catch (Exception ex)
             {
                 logger.LogError(ex, "Failed to delete subscription {SubscriptionId}", sub.SubscriptionId);
             }
 
-            await subscriptionStore.RemoveAsync(sub.SubscriptionId);
+            await subscriptionStore.RemoveAsync(sub.SubscriptionId, cancellationToken);
         }
 
-        await tokenStore.RemoveAsync("microsoft", "default");
+        await tokenStore.RemoveAsync("microsoft", "default", cancellationToken);
 
         logger.LogInformation("Email disconnected");
         return Results.Ok(new { message = "Email disconnected" });

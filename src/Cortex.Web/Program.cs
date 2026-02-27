@@ -7,6 +7,9 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.Configure<EmailProviderOptions>(
     builder.Configuration.GetSection("Email"));
 
+// HTTP client factory
+builder.Services.AddHttpClient();
+
 // Email services
 builder.Services.AddSingleton<ITokenStore, InMemoryTokenStore>();
 builder.Services.AddSingleton<IEmailDeduplicationStore, InMemoryEmailDeduplicationStore>();

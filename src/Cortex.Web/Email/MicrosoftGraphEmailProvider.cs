@@ -23,6 +23,7 @@ public sealed class MicrosoftGraphEmailProvider : IEmailProvider
 
     private readonly EmailProviderOptions _options;
     private readonly ITokenStore _tokenStore;
+    private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<MicrosoftGraphEmailProvider> _logger;
 
     /// <summary>
@@ -30,18 +31,22 @@ public sealed class MicrosoftGraphEmailProvider : IEmailProvider
     /// </summary>
     /// <param name="options">OAuth application configuration.</param>
     /// <param name="tokenStore">Store for persisting OAuth tokens.</param>
+    /// <param name="httpClientFactory">Factory for creating HTTP clients.</param>
     /// <param name="logger">Logger instance.</param>
     public MicrosoftGraphEmailProvider(
         IOptions<EmailProviderOptions> options,
         ITokenStore tokenStore,
+        IHttpClientFactory httpClientFactory,
         ILogger<MicrosoftGraphEmailProvider> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(tokenStore);
+        ArgumentNullException.ThrowIfNull(httpClientFactory);
         ArgumentNullException.ThrowIfNull(logger);
 
         _options = options.Value;
         _tokenStore = tokenStore;
+        _httpClientFactory = httpClientFactory;
         _logger = logger;
     }
 
@@ -230,18 +235,21 @@ public sealed class MicrosoftGraphEmailProvider : IEmailProvider
 
         var created = await client.Subscriptions.PostAsync(subscription, cancellationToken: cancellationToken);
 
+        var id = created?.Id ?? throw new InvalidOperationException("Graph API returned subscription with null ID");
+        var expiresAt = created.ExpirationDateTime ?? throw new InvalidOperationException("Graph API returned subscription with null expiry");
+
         _logger.LogInformation(
             "Created Graph subscription {SubscriptionId} for user {UserId}, expires {ExpiresAt}",
-            created!.Id,
+            id,
             userId,
-            created.ExpirationDateTime);
+            expiresAt);
 
         return new SubscriptionRecord
         {
-            SubscriptionId = created.Id!,
+            SubscriptionId = id,
             Provider = ProviderName,
             UserId = userId,
-            ExpiresAt = created.ExpirationDateTime!.Value,
+            ExpiresAt = expiresAt,
             Resource = SubscriptionResource
         };
     }
@@ -264,17 +272,19 @@ public sealed class MicrosoftGraphEmailProvider : IEmailProvider
         var renewed = await client.Subscriptions[subscriptionId]
             .PatchAsync(update, cancellationToken: cancellationToken);
 
+        var expiresAt = renewed?.ExpirationDateTime ?? throw new InvalidOperationException("Graph API returned subscription with null expiry");
+
         _logger.LogInformation(
             "Renewed Graph subscription {SubscriptionId}, new expiry {ExpiresAt}",
             subscriptionId,
-            renewed!.ExpirationDateTime);
+            expiresAt);
 
         return new SubscriptionRecord
         {
             SubscriptionId = subscriptionId,
             Provider = ProviderName,
             UserId = "me",
-            ExpiresAt = renewed.ExpirationDateTime!.Value,
+            ExpiresAt = expiresAt,
             Resource = SubscriptionResource
         };
     }
@@ -323,7 +333,7 @@ public sealed class MicrosoftGraphEmailProvider : IEmailProvider
         string refreshToken,
         CancellationToken cancellationToken)
     {
-        using var httpClient = new HttpClient();
+        using var httpClient = _httpClientFactory.CreateClient();
 
         var tokenEndpoint = $"https://login.microsoftonline.com/{_options.TenantId}/oauth2/v2.0/token";
 

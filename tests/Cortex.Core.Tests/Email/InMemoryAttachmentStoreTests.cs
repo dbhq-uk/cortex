@@ -1,4 +1,3 @@
-using System.Text;
 using Cortex.Core.Email;
 
 namespace Cortex.Core.Tests.Email;

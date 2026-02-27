@@ -3,6 +3,7 @@ using Cortex.Core.Messages;
 using Cortex.Web.Email;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using NSubstitute;
 
 namespace Cortex.Web.Tests.Email;
 
@@ -20,7 +21,8 @@ public class MicrosoftGraphEmailProviderTests
         });
 
         var tokenStore = new InMemoryTokenStore();
-        var provider = new MicrosoftGraphEmailProvider(options, tokenStore, NullLogger<MicrosoftGraphEmailProvider>.Instance);
+        var httpClientFactory = Substitute.For<IHttpClientFactory>();
+        var provider = new MicrosoftGraphEmailProvider(options, tokenStore, httpClientFactory, NullLogger<MicrosoftGraphEmailProvider>.Instance);
 
         var headers = new Dictionary<string, string>();
         var payload = "{\"validationToken\": \"test-token-123\"}";
@@ -42,7 +44,8 @@ public class MicrosoftGraphEmailProviderTests
         });
 
         var tokenStore = new InMemoryTokenStore();
-        var provider = new MicrosoftGraphEmailProvider(options, tokenStore, NullLogger<MicrosoftGraphEmailProvider>.Instance);
+        var httpClientFactory = Substitute.For<IHttpClientFactory>();
+        var provider = new MicrosoftGraphEmailProvider(options, tokenStore, httpClientFactory, NullLogger<MicrosoftGraphEmailProvider>.Instance);
 
         var headers = new Dictionary<string, string>();
         var payload = "{\"value\": []}";
