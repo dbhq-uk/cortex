@@ -1,3 +1,4 @@
+using Cortex.Core.Authority;
 using Cortex.Core.Messages;
 using Cortex.Messaging;
 using Microsoft.Extensions.Logging;
@@ -16,16 +17,26 @@ public sealed class AgentHarness
     private readonly IMessageBus _messageBus;
     private readonly IAgentRegistry _agentRegistry;
     private readonly ILogger<AgentHarness> _logger;
+    private readonly IAuthorityProvider? _authorityProvider;
     private IAsyncDisposable? _consumerHandle;
 
     /// <summary>
     /// Creates a new <see cref="AgentHarness"/> for the specified agent.
     /// </summary>
+    /// <param name="agent">The agent this harness manages.</param>
+    /// <param name="messageBus">The message bus for publishing and consuming.</param>
+    /// <param name="agentRegistry">The agent registry for registration tracking.</param>
+    /// <param name="logger">Logger instance.</param>
+    /// <param name="authorityProvider">
+    /// Optional authority provider for validating claims on incoming messages.
+    /// When <c>null</c>, authority validation is skipped (backward compatible).
+    /// </param>
     public AgentHarness(
         IAgent agent,
         IMessageBus messageBus,
         IAgentRegistry agentRegistry,
-        ILogger<AgentHarness> logger)
+        ILogger<AgentHarness> logger,
+        IAuthorityProvider? authorityProvider = null)
     {
         ArgumentNullException.ThrowIfNull(agent);
         ArgumentNullException.ThrowIfNull(messageBus);
@@ -36,6 +47,7 @@ public sealed class AgentHarness
         _messageBus = messageBus;
         _agentRegistry = agentRegistry;
         _logger = logger;
+        _authorityProvider = authorityProvider;
     }
 
     /// <summary>
@@ -106,6 +118,14 @@ public sealed class AgentHarness
             "Agent {AgentId} processing message {MessageId}",
             _agent.AgentId, envelope.Message.MessageId);
 
+        if (!ValidateAuthorityClaims(envelope))
+        {
+            _logger.LogWarning(
+                "Agent {AgentId} dropping message {MessageId} — authority claim validation failed",
+                _agent.AgentId, envelope.Message.MessageId);
+            return;
+        }
+
         var response = await _agent.ProcessAsync(envelope);
 
         if (response is null)
@@ -139,5 +159,37 @@ public sealed class AgentHarness
         _logger.LogDebug(
             "Agent {AgentId} published reply to {ReplyTo}",
             _agent.AgentId, replyTo);
+    }
+
+    private bool ValidateAuthorityClaims(MessageEnvelope envelope)
+    {
+        // No provider = no validation (backward compatible)
+        if (_authorityProvider is null)
+        {
+            return true;
+        }
+
+        // No claims = allow through (claims are optional)
+        if (envelope.AuthorityClaims.Count == 0)
+        {
+            return true;
+        }
+
+        foreach (var claim in envelope.AuthorityClaims)
+        {
+            // Reject expired claims
+            if (claim.ExpiresAt.HasValue && claim.ExpiresAt.Value < DateTimeOffset.UtcNow)
+            {
+                return false;
+            }
+
+            // Reject claims granted to a different agent
+            if (!string.Equals(claim.GrantedTo, _agent.AgentId, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

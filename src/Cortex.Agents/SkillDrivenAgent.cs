@@ -30,6 +30,7 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
     private readonly ILogger<SkillDrivenAgent> _logger;
     private readonly IContextProvider? _contextProvider;
     private readonly IWorkflowTracker _workflowTracker;
+    private readonly IPendingPlanStore _pendingPlanStore;
 
     /// <summary>
     /// Creates a new <see cref="SkillDrivenAgent"/> with the given persona and dependencies.
@@ -43,7 +44,8 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
         IMessagePublisher messagePublisher,
         ILogger<SkillDrivenAgent> logger,
         IContextProvider? contextProvider = null,
-        IWorkflowTracker? workflowTracker = null)
+        IWorkflowTracker? workflowTracker = null,
+        IPendingPlanStore? pendingPlanStore = null)
     {
         ArgumentNullException.ThrowIfNull(persona);
         ArgumentNullException.ThrowIfNull(pipelineRunner);
@@ -62,6 +64,7 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
         _logger = logger;
         _contextProvider = contextProvider;
         _workflowTracker = workflowTracker ?? new NullWorkflowTracker();
+        _pendingPlanStore = pendingPlanStore ?? new NullPendingPlanStore();
     }
 
     /// <inheritdoc />
@@ -84,6 +87,12 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
         _logger.LogInformation(
             "Agent {AgentId} processing message {MessageId}",
             AgentId, envelope.Message.MessageId);
+
+        // Check if this is a plan approval response
+        if (envelope.Message is PlanApprovalResponse approval)
+        {
+            return await HandlePlanApprovalAsync(envelope, approval, cancellationToken);
+        }
 
         // Check if this is a sub-task reply for a pending workflow
         var workflow = await _workflowTracker.FindBySubtaskAsync(envelope.ReferenceCode, cancellationToken);
@@ -134,6 +143,13 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
         {
             await EscalateAsync(envelope, "No tasks in decomposition", cancellationToken);
             return null;
+        }
+
+        // AskMeFirst gate: require approval before dispatching
+        var maxTier = GetMaxAuthorityTier(envelope);
+        if (maxTier >= AuthorityTier.AskMeFirst)
+        {
+            return await GatePlanForApprovalAsync(envelope, decomposition, cancellationToken);
         }
 
         if (decomposition.Tasks.Count == 1)
@@ -394,6 +410,111 @@ public sealed class SkillDrivenAgent : IAgent, IAgentTypeProvider
             parentRefCode, subtaskRefCodes.Count);
 
         return null;
+    }
+
+    private async Task<MessageEnvelope?> GatePlanForApprovalAsync(
+        MessageEnvelope envelope,
+        DecompositionResult decomposition,
+        CancellationToken cancellationToken)
+    {
+        var refCode = await _referenceCodeGenerator.GenerateAsync(cancellationToken);
+
+        var pendingPlan = new PendingPlan
+        {
+            OriginalEnvelope = envelope,
+            Decomposition = decomposition,
+            StoredAt = DateTimeOffset.UtcNow
+        };
+
+        await _pendingPlanStore.StoreAsync(refCode, pendingPlan, cancellationToken);
+
+        var proposal = new PlanProposal
+        {
+            Summary = decomposition.Summary,
+            TaskDescriptions = decomposition.Tasks.Select(t => t.Description).ToList(),
+            OriginalGoal = envelope.Message is TextMessage text ? text.Content : "Unknown goal",
+            WorkflowReferenceCode = refCode
+        };
+
+        var proposalEnvelope = new MessageEnvelope
+        {
+            Message = proposal,
+            ReferenceCode = refCode,
+            Context = new MessageContext
+            {
+                ParentMessageId = envelope.Message.MessageId,
+                FromAgentId = AgentId,
+                ReplyTo = $"agent.{AgentId}"
+            }
+        };
+
+        await _messagePublisher.PublishAsync(
+            proposalEnvelope, _persona.EscalationTarget, cancellationToken);
+
+        _logger.LogInformation(
+            "AskMeFirst gate: plan {RefCode} sent to {Target} for approval ({TaskCount} tasks)",
+            refCode, _persona.EscalationTarget, decomposition.Tasks.Count);
+
+        return null;
+    }
+
+    private async Task<MessageEnvelope?> HandlePlanApprovalAsync(
+        MessageEnvelope envelope,
+        PlanApprovalResponse approval,
+        CancellationToken cancellationToken)
+    {
+        var plan = await _pendingPlanStore.GetAsync(approval.WorkflowReferenceCode, cancellationToken);
+
+        if (plan is null)
+        {
+            _logger.LogWarning(
+                "Received approval for unknown plan {RefCode}",
+                approval.WorkflowReferenceCode);
+            return null;
+        }
+
+        await _pendingPlanStore.RemoveAsync(approval.WorkflowReferenceCode, cancellationToken);
+
+        if (!approval.IsApproved)
+        {
+            // Publish rejection notification to original requester
+            var replyTo = plan.OriginalEnvelope.Context.ReplyTo;
+            if (replyTo is not null)
+            {
+                var rejectionMessage = new TextMessage(
+                    $"Plan rejected: {approval.RejectionReason ?? "No reason given"}");
+                var rejectionEnvelope = new MessageEnvelope
+                {
+                    Message = rejectionMessage,
+                    ReferenceCode = approval.WorkflowReferenceCode,
+                    Context = new MessageContext
+                    {
+                        ParentMessageId = envelope.Message.MessageId,
+                        FromAgentId = AgentId
+                    }
+                };
+                await _messagePublisher.PublishAsync(rejectionEnvelope, replyTo, cancellationToken);
+            }
+
+            _logger.LogInformation(
+                "Plan {RefCode} rejected: {Reason}",
+                approval.WorkflowReferenceCode, approval.RejectionReason);
+
+            return null;
+        }
+
+        // Approved — resume routing with the stored decomposition
+        _logger.LogInformation("Plan {RefCode} approved, resuming dispatch", approval.WorkflowReferenceCode);
+
+        var decomposition = plan.Decomposition;
+        var originalEnvelope = plan.OriginalEnvelope;
+
+        if (decomposition.Tasks.Count == 1)
+        {
+            return await RouteSingleTaskAsync(originalEnvelope, decomposition.Tasks[0], cancellationToken);
+        }
+
+        return await RouteWorkflowAsync(originalEnvelope, decomposition, cancellationToken);
     }
 
     private async Task EscalateAsync(
