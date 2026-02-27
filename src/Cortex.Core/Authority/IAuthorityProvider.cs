@@ -14,4 +14,14 @@ public interface IAuthorityProvider
     /// Checks whether an agent has sufficient authority for an action at the specified minimum tier.
     /// </summary>
     Task<bool> HasAuthorityAsync(string agentId, string action, AuthorityTier minimumTier, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Grants an authority claim.
+    /// </summary>
+    Task GrantAsync(AuthorityClaim claim, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Revokes the authority claim for a specific agent and action.
+    /// </summary>
+    Task RevokeAsync(string agentId, string action, CancellationToken cancellationToken = default);
 }
