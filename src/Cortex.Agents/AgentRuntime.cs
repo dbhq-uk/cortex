@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Cortex.Core.Authority;
 using Cortex.Messaging;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -16,6 +17,7 @@ public sealed class AgentRuntime : IHostedService, IAgentRuntime
     private readonly IReadOnlyList<IAgent> _startupAgents;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<AgentRuntime> _logger;
+    private readonly IAuthorityProvider? _authorityProvider;
     private readonly ConcurrentDictionary<string, AgentHarness> _harnesses = new();
     private readonly ConcurrentDictionary<string, ConcurrentBag<string>> _teamAgents = new();
     private readonly ConcurrentDictionary<string, string> _agentTeams = new();
@@ -23,11 +25,20 @@ public sealed class AgentRuntime : IHostedService, IAgentRuntime
     /// <summary>
     /// Creates a new <see cref="AgentRuntime"/>.
     /// </summary>
+    /// <param name="messageBus">The message bus for agent communication.</param>
+    /// <param name="agentRegistry">The agent registry for tracking agent registrations.</param>
+    /// <param name="startupAgents">Agents to start when the runtime starts.</param>
+    /// <param name="loggerFactory">Factory for creating loggers.</param>
+    /// <param name="authorityProvider">
+    /// Optional authority provider passed to each <see cref="AgentHarness"/> for claim validation.
+    /// When <c>null</c>, harnesses skip authority validation.
+    /// </param>
     public AgentRuntime(
         IMessageBus messageBus,
         IAgentRegistry agentRegistry,
         IEnumerable<IAgent> startupAgents,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        IAuthorityProvider? authorityProvider = null)
     {
         ArgumentNullException.ThrowIfNull(messageBus);
         ArgumentNullException.ThrowIfNull(agentRegistry);
@@ -39,6 +50,7 @@ public sealed class AgentRuntime : IHostedService, IAgentRuntime
         _startupAgents = startupAgents.ToList();
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<AgentRuntime>();
+        _authorityProvider = authorityProvider;
     }
 
     /// <inheritdoc />
@@ -150,7 +162,8 @@ public sealed class AgentRuntime : IHostedService, IAgentRuntime
             agent,
             _messageBus,
             _agentRegistry,
-            _loggerFactory.CreateLogger<AgentHarness>());
+            _loggerFactory.CreateLogger<AgentHarness>(),
+            _authorityProvider);
 
         if (!_harnesses.TryAdd(agent.AgentId, harness))
         {
