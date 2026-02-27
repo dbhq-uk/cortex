@@ -15,6 +15,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Cortex.Web\Cortex.Web.csproj" />
     <ProjectReference Include="..\..\src\Cortex.Core\Cortex.Core.csproj" />
+    <ProjectReference Include="..\..\src\Cortex.Messaging\Cortex.Messaging.csproj" />
   </ItemGroup>
 
   <ItemGroup>
