@@ -52,6 +52,9 @@ public sealed class InMemoryAuthorityProvider : IAuthorityProvider
     /// <inheritdoc />
     public Task RevokeAsync(string agentId, string action, CancellationToken cancellationToken = default)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(agentId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(action);
+
         _claims.TryRemove((agentId, action), out _);
         return Task.CompletedTask;
     }
@@ -59,14 +62,30 @@ public sealed class InMemoryAuthorityProvider : IAuthorityProvider
     /// <inheritdoc />
     public Task<AuthorityClaim?> GetClaimAsync(string agentId, string action, CancellationToken cancellationToken = default)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(agentId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(action);
+
         // Check specific action first, then fall back to wildcard.
-        if (_claims.TryGetValue((agentId, action), out var claim) && !IsExpired(claim))
+        if (_claims.TryGetValue((agentId, action), out var claim))
         {
-            return Task.FromResult<AuthorityClaim?>(claim);
+            if (IsExpired(claim))
+            {
+                _claims.TryRemove((agentId, action), out _);
+            }
+            else
+            {
+                return Task.FromResult<AuthorityClaim?>(claim);
+            }
         }
 
-        if (_claims.TryGetValue((agentId, "*"), out var wildcardClaim) && !IsExpired(wildcardClaim))
+        if (_claims.TryGetValue((agentId, "*"), out var wildcardClaim))
         {
+            if (IsExpired(wildcardClaim))
+            {
+                _claims.TryRemove((agentId, "*"), out _);
+                return Task.FromResult<AuthorityClaim?>(null);
+            }
+
             return Task.FromResult<AuthorityClaim?>(wildcardClaim);
         }
 
