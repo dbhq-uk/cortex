@@ -7,4 +7,9 @@
     <ProjectReference Include="..\Cortex.Skills\Cortex.Skills.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Azure.Identity" Version="1.*" />
+    <PackageReference Include="Microsoft.Graph" Version="5.*" />
+  </ItemGroup>
+
 </Project>

@@ -13,5 +13,6 @@
     <Project Path="tests/Cortex.Messaging.RabbitMQ.Tests/Cortex.Messaging.RabbitMQ.Tests.csproj" />
     <Project Path="tests/Cortex.Messaging.Tests/Cortex.Messaging.Tests.csproj" />
     <Project Path="tests/Cortex.Skills.Tests/Cortex.Skills.Tests.csproj" />
+    <Project Path="tests/Cortex.Web.Tests/Cortex.Web.Tests.csproj" />
   </Folder>
 </Solution>
